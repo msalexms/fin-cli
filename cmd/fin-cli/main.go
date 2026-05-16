@@ -83,6 +83,8 @@ below for one-shot operations.`,
 	pf.BoolVar(&opt.Debug, "debug", false, "enable debug logging to the log file")
 	pf.StringVar(&opt.FinnhubKey, "finnhub-key", "", "override Finnhub API key (takes precedence over env/config)")
 	pf.StringVar(&opt.OpenFIGIKey, "openfigi-key", "", "override OpenFIGI API key")
+	pf.StringVar(&opt.TwelveDataKey, "twelvedata-key", "", "override Twelve Data API key")
+	pf.StringVar(&opt.AlphaVantageKey, "alphavantage-key", "", "override Alpha Vantage API key")
 	pf.StringVar(&opt.ConfigPath, "config", "", "override path to config.toml")
 	pf.StringVar(&opt.WatchlistPath, "watchlist", "", "override path to watchlist.toml")
 
@@ -91,6 +93,7 @@ below for one-shot operations.`,
 		cli.NewAddCmd(appFactory),
 		cli.NewRemoveCmd(appFactory),
 		cli.NewListCmd(appFactory),
+		cli.NewExportCmd(appFactory),
 		cli.NewConfigCmd(appFactory),
 		cli.NewPurgeCmd(appFactory),
 	)

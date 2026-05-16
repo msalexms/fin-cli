@@ -15,8 +15,10 @@ import (
 	"fin-cli/internal/isin"
 	"fin-cli/internal/locale"
 	"fin-cli/internal/logging"
+	"fin-cli/internal/providers/alphavantage"
 	"fin-cli/internal/providers/finnhub"
 	"fin-cli/internal/providers/openfigi"
+	"fin-cli/internal/providers/twelvedata"
 	"fin-cli/internal/providers/yahoo"
 	"fin-cli/internal/quotes"
 	"fin-cli/internal/throttle"
@@ -43,17 +45,21 @@ type App struct {
 	NoColor   bool
 	ASCIIOnly bool
 
-	finnhubKey  string
-	openfigiKey string
+	finnhubKey      string
+	openfigiKey     string
+	twelvedataKey   string
+	alphavantageKey string
 }
 
 // AppOptions are toggles passed from the root command.
 type AppOptions struct {
-	Debug         bool
-	FinnhubKey    string
-	OpenFIGIKey   string
-	ConfigPath    string
-	WatchlistPath string
+	Debug           bool
+	FinnhubKey      string
+	OpenFIGIKey     string
+	TwelveDataKey   string
+	AlphaVantageKey string
+	ConfigPath      string
+	WatchlistPath   string
 }
 
 // NewApp wires up all dependencies.
@@ -85,6 +91,8 @@ func NewApp(opt AppOptions) (*App, error) {
 
 	finnhubKey := firstNonEmpty(opt.FinnhubKey, os.Getenv("FIN_CLI_FINNHUB_KEY"), cfg.Finnhub.APIKey)
 	openfigiKey := firstNonEmpty(opt.OpenFIGIKey, os.Getenv("FIN_CLI_OPENFIGI_KEY"), cfg.OpenFIGI.APIKey)
+	twelvedataKey := firstNonEmpty(opt.TwelveDataKey, os.Getenv("FIN_CLI_TWELVEDATA_KEY"), cfg.TwelveData.APIKey)
+	alphavantageKey := firstNonEmpty(opt.AlphaVantageKey, os.Getenv("FIN_CLI_ALPHAVANTAGE_KEY"), cfg.AlphaVantage.APIKey)
 
 	httpC := httpx.New()
 	lim := throttle.NewPerMinute(60, 5)
@@ -94,14 +102,32 @@ func NewApp(opt AppOptions) (*App, error) {
 	iStore := cache.New(paths.ISINCache)
 	wStore := watchlist.New(paths.Watchlist)
 
+	// --- Build provider instances ---
 	finnhubProv := finnhub.New(finnhubKey)
-	openfigiProv := openfigi.New(httpC, openfigiKey)
 	yahooProv := yahoo.New(httpC)
+	twelvedataProv := twelvedata.New(httpC, twelvedataKey)
+	alphaProv := alphavantage.New(httpC, alphavantageKey)
+	openfigiProv := openfigi.New(httpC, openfigiKey)
 
-	// TTL of the quotes cache == polling interval: the TUI "force refresh"
-	// bypasses the cache and always hits the provider, so there is no overlap.
-	quoteSvc := quotes.New(finnhubProv, qStore, lim, cfg.PollingInterval.Std()).
-		WithHistoryProvider(yahooProv)
+	// Provider registry: maps name -> MarketProvider instance.
+	providerRegistry := map[string]domain.MarketProvider{
+		"finnhub":      finnhubProv,
+		"yahoo":        yahooProv,
+		"twelvedata":   twelvedataProv,
+		"alphavantage": alphaProv,
+	}
+
+	// Build the quote provider chain from config.
+	quoteProviders := buildProviderChain(cfg.Providers, providerRegistry, finnhubKey, twelvedataKey, alphavantageKey)
+
+	// Build the history provider chain from config.
+	historyProviders := buildHistoryChain(cfg.HistoryProviders, providerRegistry)
+
+	chain := quotes.NewProviderChain(quoteProviders...)
+	histChain := quotes.NewHistoryChain(historyProviders...)
+
+	// TTL of the quotes cache == polling interval.
+	quoteSvc := quotes.NewWithChain(chain, histChain, qStore, lim, cfg.PollingInterval.Std())
 	isinSvc := isin.New(openfigiProv, iStore, 0)
 
 	noColor := envFlag("NO_COLOR")
@@ -111,22 +137,24 @@ func NewApp(opt AppOptions) (*App, error) {
 	}
 
 	app := &App{
-		Paths:       paths,
-		Config:      cfg,
-		Logger:      logger,
-		LogCloser:   closer,
-		HTTP:        httpC,
-		Throttle:    lim,
-		Printer:     printer,
-		QuoteStore:  qStore,
-		ISINStore:   iStore,
-		Watchlist:   wStore,
-		Quotes:      quoteSvc,
-		ISINs:       isinSvc,
-		NoColor:     noColor,
-		ASCIIOnly:   printer.ASCIIOnly(),
-		finnhubKey:  finnhubKey,
-		openfigiKey: openfigiKey,
+		Paths:           paths,
+		Config:          cfg,
+		Logger:          logger,
+		LogCloser:       closer,
+		HTTP:            httpC,
+		Throttle:        lim,
+		Printer:         printer,
+		QuoteStore:      qStore,
+		ISINStore:       iStore,
+		Watchlist:       wStore,
+		Quotes:          quoteSvc,
+		ISINs:           isinSvc,
+		NoColor:         noColor,
+		ASCIIOnly:       printer.ASCIIOnly(),
+		finnhubKey:      finnhubKey,
+		openfigiKey:     openfigiKey,
+		twelvedataKey:   twelvedataKey,
+		alphavantageKey: alphavantageKey,
 	}
 
 	if quoteSvc.TTL <= 0 {
@@ -136,6 +164,10 @@ func NewApp(opt AppOptions) (*App, error) {
 		slog.String("config", paths.ConfigFile),
 		slog.Bool("has_finnhub_key", finnhubKey != ""),
 		slog.Bool("has_openfigi_key", openfigiKey != ""),
+		slog.Bool("has_twelvedata_key", twelvedataKey != ""),
+		slog.Bool("has_alphavantage_key", alphavantageKey != ""),
+		slog.Any("providers", cfg.Providers),
+		slog.Any("history_providers", cfg.HistoryProviders),
 	)
 
 	return app, nil
@@ -169,6 +201,50 @@ func (a *App) ResolveInput(ctx context.Context, arg string, forceISIN bool) (dom
 		return a.ISINs.Resolve(ctx, domain.ISIN(arg))
 	}
 	return domain.Ticker(arg), nil
+}
+
+// --- provider chain builders ---
+
+// buildProviderChain creates an ordered slice of MarketProviders from config names.
+// Providers that require an API key but have none are still included; the chain
+// will receive ErrNoAPIKey and skip them at runtime.
+func buildProviderChain(names []string, registry map[string]domain.MarketProvider, finnhubKey, twelvedataKey, alphaKey string) []domain.MarketProvider {
+	if len(names) == 0 {
+		// Fallback: if config has no providers, use finnhub + yahoo.
+		names = []string{"finnhub", "yahoo"}
+	}
+	var providers []domain.MarketProvider
+	for _, name := range names {
+		p, ok := registry[name]
+		if !ok {
+			continue
+		}
+		providers = append(providers, p)
+	}
+	if len(providers) == 0 {
+		// Safety: always have at least yahoo (keyless).
+		if p, ok := registry["yahoo"]; ok {
+			providers = append(providers, p)
+		}
+	}
+	return providers
+}
+
+// buildHistoryChain creates an ordered slice of HistoryProviders from config names.
+func buildHistoryChain(names []string, registry map[string]domain.MarketProvider) []domain.HistoryProvider {
+	if len(names) == 0 {
+		names = []string{"yahoo"}
+	}
+	var providers []domain.HistoryProvider
+	for _, name := range names {
+		p, ok := registry[name]
+		if !ok {
+			continue
+		}
+		// MarketProvider satisfies HistoryProvider (it has History method).
+		providers = append(providers, p)
+	}
+	return providers
 }
 
 func firstNonEmpty(ss ...string) string {

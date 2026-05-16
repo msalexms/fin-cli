@@ -20,6 +20,36 @@ const (
 	modeConfirm             // confirm delete
 )
 
+// SortMode controls how the watchlist sidebar is sorted.
+type SortMode int
+
+const (
+	SortManual     SortMode = iota // insertion order (original)
+	SortChangeDesc                 // change % descending (best first)
+	SortChangeAsc                  // change % ascending (worst first)
+	SortAlpha                      // alphabetical A-Z
+	SortVolume                     // volume descending
+	sortModeCount                  // sentinel for cycling
+)
+
+// String returns a short label for the sort mode.
+func (s SortMode) String() string {
+	switch s {
+	case SortManual:
+		return "manual"
+	case SortChangeDesc:
+		return "%change"
+	case SortChangeAsc:
+		return "%change asc"
+	case SortAlpha:
+		return "alpha"
+	case SortVolume:
+		return "volume"
+	default:
+		return "manual"
+	}
+}
+
 // Model is the Bubbletea model of the interactive dashboard.
 type Model struct {
 	ctx context.Context
@@ -35,13 +65,17 @@ type Model struct {
 	tickers  []domain.Ticker
 	selected int
 
-	quotes  map[domain.Ticker]domain.Quote
-	candles map[domain.Ticker][]domain.Candle
-	loading map[domain.Ticker]bool
-	errs    map[domain.Ticker]error
+	quotes     map[domain.Ticker]domain.Quote
+	candles    map[domain.Ticker][]domain.Candle
+	sparklines map[domain.Ticker][]float64 // 5-day close prices for sidebar sparkline
+	loading    map[domain.Ticker]bool
+	errs       map[domain.Ticker]error
 
 	lastTick  time.Time
 	globalErr error
+
+	// Sort
+	sortMode SortMode
 
 	// Interaction state
 	mode     mode
@@ -59,24 +93,44 @@ func newModel(ctx context.Context, app *cli.App) *Model {
 
 	in := textinput.New()
 	in.Placeholder = "AAPL or US0378331005"
-	in.Prompt = "› "
+	in.Prompt = "\u203A "
 	in.CharLimit = 16
 	in.Width = 24
 	in.PromptStyle = st.Title
 	in.TextStyle = st.Base
 	in.PlaceholderStyle = st.Subtle
 
+	// Parse initial sort mode from config.
+	initialSort := parseSortMode(app.Config.UI.SortMode)
+
 	return &Model{
-		ctx:      ctx,
-		app:      app,
-		styles:   st,
-		keys:     DefaultKeyMap(),
-		sp:       s,
-		input:    in,
-		quotes:   make(map[domain.Ticker]domain.Quote),
-		candles:  make(map[domain.Ticker][]domain.Candle),
-		loading:  make(map[domain.Ticker]bool),
-		errs:     make(map[domain.Ticker]error),
-		lastTick: time.Now(),
+		ctx:        ctx,
+		app:        app,
+		styles:     st,
+		keys:       DefaultKeyMap(),
+		sp:         s,
+		input:      in,
+		quotes:     make(map[domain.Ticker]domain.Quote),
+		candles:    make(map[domain.Ticker][]domain.Candle),
+		sparklines: make(map[domain.Ticker][]float64),
+		loading:    make(map[domain.Ticker]bool),
+		errs:       make(map[domain.Ticker]error),
+		lastTick:   time.Now(),
+		sortMode:   initialSort,
+	}
+}
+
+func parseSortMode(s string) SortMode {
+	switch s {
+	case "change_desc":
+		return SortChangeDesc
+	case "change_asc":
+		return SortChangeAsc
+	case "alpha":
+		return SortAlpha
+	case "volume":
+		return SortVolume
+	default:
+		return SortManual
 	}
 }

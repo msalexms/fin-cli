@@ -11,6 +11,7 @@ import (
 
 	"fin-cli/internal/chart"
 	"fin-cli/internal/domain"
+	"fin-cli/internal/format"
 	"fin-cli/internal/locale"
 )
 
@@ -90,7 +91,7 @@ func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt Rende
 	p := opt.Printer
 
 	// --- title line ---
-	badge, provider := sourceBadge(q)
+	badge, provider := format.SourceBadge(q)
 	badgeColored := opt.colorize(badgeColor(q), badge)
 	title := opt.colorize(ansiBold, "▌ "+string(q.Symbol))
 	name := ""
@@ -99,12 +100,13 @@ func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt Rende
 	}
 	right := badgeColored + " " + opt.colorize(ansiLabel, provider)
 	fmt.Fprintln(w, pad(title+name, right, opt.Width))
-	fmt.Fprintln(w, opt.colorize(ansiSubtle, repeat("─", opt.Width)))
+	fmt.Fprintln(w, opt.colorize(ansiSubtle, format.Repeat("─", opt.Width)))
 
 	// --- price line ---
 	priceStr := opt.colorize(ansiBold, p.Sprintf("%.2f", q.Price))
 	cur := q.Currency
-	arrow, body := changeParts(q, opt.ASCIIOnly)
+	arrow := format.ChangeArrow(q.Change, opt.ASCIIOnly)
+	body := format.ChangeBody(p, q.Change, q.ChangePct)
 	color := ansiLabel
 	if q.Change > 0 {
 		color = ansiGreen
@@ -113,7 +115,7 @@ func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt Rende
 	}
 	change := opt.colorize(color, arrow+" "+body)
 	sessTag := ""
-	if s := sessionTag(q); s != "" {
+	if s := format.SessionLabel(q.Session); s != "" {
 		sessTag = "   " + opt.colorize(ansiLabel, "· "+s)
 	}
 	fmt.Fprintln(w)
@@ -121,11 +123,11 @@ func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt Rende
 	fmt.Fprintln(w)
 
 	// --- stats grid ---
-	renderGrid(w, statsRows(q, p), opt)
+	renderGrid(w, format.StatsRows(q, p), opt)
 
 	// --- meta line ---
-	if meta := metaLine(q); meta != "" {
-		fmt.Fprintln(w, opt.colorize(ansiSubtle, repeat("─", opt.Width)))
+	if meta := format.MetaLine(q); meta != "" {
+		fmt.Fprintln(w, opt.colorize(ansiSubtle, format.Repeat("─", opt.Width)))
 		fmt.Fprintf(w, "  %s\n", opt.colorize(ansiLabel, meta))
 	}
 
@@ -156,20 +158,17 @@ func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt Rende
 	fmt.Fprintln(w, opt.colorize(ansiLabel, "  fetched "+q.FetchedAt.Local().Format(time.RFC3339)))
 }
 
-// --- sections ---
+// --- helpers ---
 
-func statsRows(q domain.Quote, p locale.Printer) [][2]string {
-	return [][2]string{
-		{"Prev Close", p.Sprintf("%.2f", q.PrevClose)},
-		{"Open", optFloat(p, q.Open)},
-		{"Day Range", rangeStrCLI(p, q.DayLow, q.DayHigh)},
-		{"52w Range", rangeStrCLI(p, q.Week52Low, q.Week52High)},
-		{"Volume", formatVolumeCLI(q.Volume)},
-		{"Market Cap", formatMarketCapCLI(q.MarketCap, q.Currency)},
-		{"P/E", optFloat(p, q.PE)},
-		{"EPS", optFloat(p, q.EPS)},
-		{"Beta", optFloat(p, q.Beta)},
-		{"Div Yield", optPercentCLI(p, q.DivYield)},
+func badgeColor(q domain.Quote) string {
+	switch q.Source {
+	case domain.SourceCache:
+		return ansiLabel
+	default:
+		if q.Partial {
+			return ansiRed
+		}
+		return ansiGreen
 	}
 }
 
@@ -195,199 +194,20 @@ func gridCell(label, value string, w int, opt RenderOptions) string {
 	if valW < 1 {
 		valW = 1
 	}
-	return opt.colorize(ansiLabel, padRightStr(label, labelW)) + " " + padRightStr(value, valW-1)
+	return opt.colorize(ansiLabel, format.PadRightANSI(label, labelW)) + " " + format.PadRightANSI(value, valW-1)
 }
 
-func metaLine(q domain.Quote) string {
-	parts := []string{}
-	if q.Exchange != "" {
-		parts = append(parts, q.Exchange)
-	}
-	if q.Industry != "" {
-		parts = append(parts, q.Industry)
-	}
-	if q.Country != "" {
-		parts = append(parts, q.Country)
-	}
-	if q.IPODate != "" {
-		parts = append(parts, "IPO "+q.IPODate)
-	}
-	return strings.Join(parts, " · ")
-}
-
-// --- helpers ---
-
-func sourceBadge(q domain.Quote) (string, string) {
-	switch q.Source {
-	case domain.SourceCache:
-		return "[~]", "cached " + q.FetchedAt.Local().Format("15:04")
-	case domain.SourceFinnhub:
-		if q.Partial {
-			return "[!]", "via finnhub (partial)"
-		}
-		return "[*]", "via finnhub"
-	}
-	return "[*]", "via " + string(q.Source)
-}
-
-func badgeColor(q domain.Quote) string {
-	switch q.Source {
-	case domain.SourceCache:
-		return ansiLabel
-	case domain.SourceFinnhub:
-		if q.Partial {
-			return ansiRed
-		}
-		return ansiGreen
-	}
-	return ansiLabel
-}
-
-func sessionTag(q domain.Quote) string {
-	switch q.Session {
-	case domain.SessionPre:
-		return "pre-market"
-	case domain.SessionRegular:
-		return "regular"
-	case domain.SessionPost:
-		return "after-hours"
-	case domain.SessionClosed:
-		return "closed"
-	}
-	return ""
-}
-
-func changeParts(q domain.Quote, asciiOnly bool) (arrow, body string) {
-	arrow = "•"
-	if q.Change > 0 {
-		arrow = "▲"
-	} else if q.Change < 0 {
-		arrow = "▼"
-	}
-	if asciiOnly {
-		switch arrow {
-		case "▲":
-			arrow = "^"
-		case "▼":
-			arrow = "v"
-		default:
-			arrow = "."
-		}
-	}
-	body = fmt.Sprintf("%+.2f (%+.2f%%)", q.Change, q.ChangePct)
-	return
-}
-
-type numPrinter interface {
-	Sprintf(string, ...any) string
-}
-
-func optFloat(p numPrinter, o domain.Optional[float64]) string {
-	if !o.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f", o.Value)
-}
-
-func optPercentCLI(p numPrinter, o domain.Optional[float64]) string {
-	if !o.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f%%", o.Value)
-}
-
-func rangeStrCLI(p numPrinter, lo, hi domain.Optional[float64]) string {
-	if !lo.Valid || !hi.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f – %.2f", lo.Value, hi.Value)
-}
-
-func formatVolumeCLI(v domain.Optional[int64]) string {
-	if !v.Valid {
-		return "—"
-	}
-	n := v.Value
-	switch {
-	case n >= 1_000_000_000:
-		return fmt.Sprintf("%.2fB", float64(n)/1_000_000_000)
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.2fK", float64(n)/1_000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
-}
-
-func formatMarketCapCLI(m domain.Optional[float64], cur string) string {
-	if !m.Valid {
-		return "—"
-	}
-	v := m.Value
-	var out string
-	switch {
-	case v >= 1_000_000:
-		out = fmt.Sprintf("%.2fT", v/1_000_000)
-	case v >= 1_000:
-		out = fmt.Sprintf("%.2fB", v/1_000)
-	default:
-		out = fmt.Sprintf("%.2fM", v)
-	}
-	if cur != "" {
-		out += " " + cur
-	}
-	return out
-}
-
-// --- primitives ---
-
-// visibleLen returns the display width of s ignoring ANSI SGR escapes.
-func visibleLen(s string) int {
-	n := 0
-	inEsc := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEsc = true
-			continue
-		}
-		if inEsc {
-			if r == 'm' {
-				inEsc = false
-			}
-			continue
-		}
-		n++
-	}
-	return n
-}
+// --- color ---
 
 func pad(left, right string, width int) string {
-	lw := visibleLen(left)
-	rw := visibleLen(right)
+	lw := format.VisibleLen(left)
+	rw := format.VisibleLen(right)
 	g := width - lw - rw
 	if g < 1 {
 		g = 1
 	}
-	return left + repeat(" ", g) + right
+	return left + format.Repeat(" ", g) + right
 }
-
-func padRightStr(s string, n int) string {
-	w := visibleLen(s)
-	if w >= n {
-		return s
-	}
-	return s + repeat(" ", n-w)
-}
-
-func repeat(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return strings.Repeat(s, n)
-}
-
-// --- color ---
 
 func (opt RenderOptions) colorize(code, s string) string {
 	if opt.NoColor {

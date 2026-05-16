@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +34,7 @@ func (m *Model) Init() tea.Cmd {
 	for _, t := range m.tickers {
 		m.loading[t] = true
 		cmds = append(cmds, fetchQuoteCmd(m.ctx, m.app.Quotes, t, false))
+		cmds = append(cmds, fetchSparklineCmd(m.ctx, m.app.Quotes, t))
 	}
 	cmds = append(cmds, pollTickCmd(m.pollInterval()))
 	return tea.Batch(cmds...)
@@ -71,6 +73,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case sparklineMsg:
+		if msg.Err == nil && len(msg.Data) > 0 {
+			m.sparklines[msg.Ticker] = msg.Data
+		}
+		return m, nil
+
 	case addResultMsg:
 		m.busy = false
 		if msg.Err != nil {
@@ -88,8 +96,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selected = len(m.tickers) - 1
 		m.exitInput()
 		m.setStatus(true, "added "+string(msg.Ticker))
-		// Kick a history fetch so the chart populates without waiting for poll.
-		return m, fetchQuoteCmd(m.ctx, m.app.Quotes, msg.Ticker, false)
+		// Kick fetches for history and sparkline.
+		return m, tea.Batch(
+			fetchQuoteCmd(m.ctx, m.app.Quotes, msg.Ticker, false),
+			fetchSparklineCmd(m.ctx, m.app.Quotes, msg.Ticker),
+		)
 
 	case deleteResultMsg:
 		m.busy = false
@@ -109,6 +120,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.loading[t] = true
 			cmds = append(cmds, fetchQuoteCmd(m.ctx, m.app.Quotes, t, true))
+			cmds = append(cmds, fetchSparklineCmd(m.ctx, m.app.Quotes, t))
 		}
 		cmds = append(cmds, pollTickCmd(m.pollInterval()))
 		m.lastTick = time.Now()
@@ -175,8 +187,55 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		t := m.tickers[m.selected]
 		m.busy = true
 		return m, deleteTickerCmd(m.app, t)
+	case keyMatches(m.keys.Sort, msg):
+		m.sortMode = (m.sortMode + 1) % SortMode(sortModeCount)
+		m.setStatus(true, "sort: "+m.sortMode.String())
+		return m, nil
 	}
 	return m, nil
+}
+
+// sortedTickers returns the tickers list sorted according to m.sortMode.
+// It does NOT modify m.tickers (which preserves insertion order for persistence).
+func (m *Model) sortedTickers() []domain.Ticker {
+	if m.sortMode == SortManual || len(m.tickers) <= 1 {
+		return m.tickers
+	}
+
+	sorted := make([]domain.Ticker, len(m.tickers))
+	copy(sorted, m.tickers)
+
+	switch m.sortMode {
+	case SortChangeDesc:
+		sort.Slice(sorted, func(i, j int) bool {
+			qi := m.quotes[sorted[i]]
+			qj := m.quotes[sorted[j]]
+			return qi.ChangePct > qj.ChangePct
+		})
+	case SortChangeAsc:
+		sort.Slice(sorted, func(i, j int) bool {
+			qi := m.quotes[sorted[i]]
+			qj := m.quotes[sorted[j]]
+			return qi.ChangePct < qj.ChangePct
+		})
+	case SortAlpha:
+		sort.Slice(sorted, func(i, j int) bool {
+			return sorted[i] < sorted[j]
+		})
+	case SortVolume:
+		sort.Slice(sorted, func(i, j int) bool {
+			vi := int64(0)
+			vj := int64(0)
+			if q, ok := m.quotes[sorted[i]]; ok && q.Volume.Valid {
+				vi = q.Volume.Value
+			}
+			if q, ok := m.quotes[sorted[j]]; ok && q.Volume.Valid {
+				vj = q.Volume.Value
+			}
+			return vi > vj
+		})
+	}
+	return sorted
 }
 
 // --- helpers ---
@@ -223,6 +282,7 @@ func (m *Model) removeTickerFromModel(t domain.Ticker) {
 	m.tickers = append(m.tickers[:idx], m.tickers[idx+1:]...)
 	delete(m.quotes, t)
 	delete(m.candles, t)
+	delete(m.sparklines, t)
 	delete(m.loading, t)
 	delete(m.errs, t)
 	if m.selected >= len(m.tickers) {

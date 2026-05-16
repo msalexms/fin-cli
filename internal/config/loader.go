@@ -13,16 +13,21 @@ import (
 )
 
 // CurrentSchemaVersion is the latest config schema fin-cli understands.
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 // Config is the root on-disk configuration.
 // Keep it flat and TOML-friendly: snake_case field names, no maps of structs.
 type Config struct {
-	SchemaVersion  int            `toml:"schema_version"`
-	PollingInterval Duration      `toml:"polling_interval"`
-	Finnhub        FinnhubConfig  `toml:"finnhub"`
-	OpenFIGI       OpenFIGIConfig `toml:"openfigi"`
-	UI             UIConfig       `toml:"ui"`
+	SchemaVersion    int      `toml:"schema_version"`
+	PollingInterval  Duration `toml:"polling_interval"`
+	Providers        []string `toml:"providers"`         // ordered quote provider chain
+	HistoryProviders []string `toml:"history_providers"` // ordered history provider chain
+
+	Finnhub      FinnhubConfig      `toml:"finnhub"`
+	OpenFIGI     OpenFIGIConfig     `toml:"openfigi"`
+	TwelveData   TwelveDataConfig   `toml:"twelvedata"`
+	AlphaVantage AlphaVantageConfig `toml:"alphavantage"`
+	UI           UIConfig           `toml:"ui"`
 }
 
 // FinnhubConfig holds provider-specific options.
@@ -35,16 +40,36 @@ type OpenFIGIConfig struct {
 	APIKey string `toml:"api_key"`
 }
 
+// TwelveDataConfig holds Twelve Data provider options.
+type TwelveDataConfig struct {
+	APIKey string `toml:"api_key"`
+}
+
+// AlphaVantageConfig holds Alpha Vantage provider options.
+type AlphaVantageConfig struct {
+	APIKey string `toml:"api_key"`
+}
+
 // UIConfig gathers presentation options.
 type UIConfig struct {
-	// Reserved for future overrides (theme, polling, etc.).
+	SortMode string `toml:"sort_mode,omitempty"` // manual | change_desc | change_asc | alpha | volume
+}
+
+// KnownProviders is the set of recognized provider names.
+var KnownProviders = map[string]bool{
+	"finnhub":      true,
+	"yahoo":        true,
+	"twelvedata":   true,
+	"alphavantage": true,
 }
 
 // Default returns the default configuration used on first run.
 func Default() Config {
 	return Config{
-		SchemaVersion:   CurrentSchemaVersion,
-		PollingInterval: Duration(5 * time.Minute),
+		SchemaVersion:    CurrentSchemaVersion,
+		PollingInterval:  Duration(5 * time.Minute),
+		Providers:        []string{"finnhub", "yahoo"},
+		HistoryProviders: []string{"yahoo", "twelvedata", "alphavantage"},
 	}
 }
 
@@ -137,10 +162,19 @@ func writeWithPlaceholders(path string) error {
 # Values can be overridden by environment variables:
 #   FIN_CLI_FINNHUB_KEY
 #   FIN_CLI_OPENFIGI_KEY
+#   FIN_CLI_TWELVEDATA_KEY
+#   FIN_CLI_ALPHAVANTAGE_KEY
 
-schema_version = 1
+schema_version = 2
 # polling_interval controls the TUI auto-refresh cadence.
 polling_interval = "5m"
+
+# Provider chain for quotes (tried in order until one succeeds).
+# Available: "finnhub", "yahoo", "twelvedata", "alphavantage"
+providers = ["finnhub", "yahoo"]
+
+# Provider chain for historical data / charts (tried in order).
+history_providers = ["yahoo", "twelvedata", "alphavantage"]
 
 [finnhub]
 # Get a free key at https://finnhub.io
@@ -151,7 +185,18 @@ api_key = ""
 # https://www.openfigi.com/api
 api_key = ""
 
+[twelvedata]
+# Get a free key at https://twelvedata.com (800 req/day)
+api_key = ""
+
+[alphavantage]
+# Get a free key at https://www.alphavantage.co/support/#api-key (25 req/day)
+api_key = ""
+
 [ui]
+# sort_mode controls default watchlist sort order.
+# Options: manual, change_desc, change_asc, alpha, volume
+# sort_mode = "manual"
 `
 	return atomicWrite(path, []byte(tpl))
 }

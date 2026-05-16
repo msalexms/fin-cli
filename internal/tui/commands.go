@@ -36,6 +36,12 @@ type deleteResultMsg struct {
 	Err    error
 }
 
+type sparklineMsg struct {
+	Ticker domain.Ticker
+	Data   []float64
+	Err    error
+}
+
 // ---- commands ----
 
 // fetchQuoteCmd returns a tea.Cmd that fetches a quote and (best-effort) history.
@@ -54,6 +60,24 @@ func fetchQuoteCmd(ctx context.Context, svc *quotes.Service, t domain.Ticker, fo
 			return quoteFetchedMsg{Ticker: t, Quote: q, Err: nil, Candles: nil, Force: force}
 		}
 		return quoteFetchedMsg{Ticker: t, Quote: q, Candles: candles, Force: force}
+	}
+}
+
+// fetchSparklineCmd fetches 5-day history for a ticker's sidebar sparkline.
+func fetchSparklineCmd(ctx context.Context, svc *quotes.Service, t domain.Ticker) tea.Cmd {
+	return func() tea.Msg {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		candles, err := svc.History(cctx, t, domain.Range5D)
+		if err != nil {
+			return sparklineMsg{Ticker: t, Err: err}
+		}
+		data := make([]float64, 0, len(candles))
+		for _, c := range candles {
+			data = append(data, c.Close)
+		}
+		return sparklineMsg{Ticker: t, Data: data}
 	}
 }
 
@@ -78,10 +102,6 @@ func addTickerCmd(ctx context.Context, app *cli.App, raw string) tea.Cmd {
 		t, err := app.ResolveInput(cctx, raw, false)
 		if err != nil {
 			return addResultMsg{Err: err}
-		}
-		if !app.HasFinnhubKey() {
-			return addResultMsg{Ticker: t,
-				Err: fmt.Errorf("%w: run `fin-cli config set finnhub.api_key <KEY>`", domain.ErrNoAPIKey)}
 		}
 		q, err := app.Quotes.Get(cctx, t, true)
 		if err != nil {

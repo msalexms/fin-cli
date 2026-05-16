@@ -1,5 +1,5 @@
-// Package quotes orchestrates the cache, throttler, and provider to serve quotes
-// to CLI and TUI. It deduplicates concurrent requests via singleflight.
+// Package quotes orchestrates the cache, throttler, and provider chain to serve
+// quotes to CLI and TUI. It deduplicates concurrent requests via singleflight.
 package quotes
 
 import (
@@ -21,16 +21,34 @@ const DefaultCacheTTL = 5 * time.Minute
 
 // Service implements domain.QuoteService.
 type Service struct {
-	Provider    domain.MarketProvider
-	HistoryProv domain.HistoryProvider // optional; overrides Provider.History when set
-	Cache       *cache.Store
-	Limiter     *throttle.Limiter
-	TTL         time.Duration
+	// Provider is the legacy single-provider field (kept for backwards compat).
+	// When Chain is set, Provider is ignored for Quote calls.
+	Provider domain.MarketProvider
+
+	// Chain is the ordered list of providers for Quote calls.
+	// If nil, Provider is used as a single-element chain.
+	Chain *ProviderChain
+
+	// HistoryProv is the legacy single history provider.
+	// When HistoryChain is set, HistoryProv is ignored.
+	HistoryProv domain.HistoryProvider
+
+	// HistoryChain is the ordered list of providers for History calls.
+	// If nil, HistoryProv or Provider.History is used.
+	HistoryChain *HistoryChain
+
+	// Limiter rate-limits outbound API calls (shared across all providers).
+	// Per-provider limiters are handled at construction in cli/app.go if needed.
+	Limiter *throttle.Limiter
+
+	Cache *cache.Store
+	TTL   time.Duration
 
 	sf singleflight.Group
 }
 
 // New builds a Service. If ttl is zero, DefaultCacheTTL is used.
+// This constructor preserves the legacy single-provider API.
 func New(p domain.MarketProvider, c *cache.Store, l *throttle.Limiter, ttl time.Duration) *Service {
 	if ttl == 0 {
 		ttl = DefaultCacheTTL
@@ -38,8 +56,22 @@ func New(p domain.MarketProvider, c *cache.Store, l *throttle.Limiter, ttl time.
 	return &Service{Provider: p, Cache: c, Limiter: l, TTL: ttl}
 }
 
-// WithHistoryProvider sets a dedicated provider for History calls
-// (e.g. Yahoo for free charts while Finnhub stays responsible for Quote).
+// NewWithChain builds a Service using a ProviderChain and HistoryChain.
+func NewWithChain(chain *ProviderChain, histChain *HistoryChain, c *cache.Store, l *throttle.Limiter, ttl time.Duration) *Service {
+	if ttl == 0 {
+		ttl = DefaultCacheTTL
+	}
+	return &Service{
+		Chain:        chain,
+		HistoryChain: histChain,
+		Cache:        c,
+		Limiter:      l,
+		TTL:          ttl,
+	}
+}
+
+// WithHistoryProvider sets a dedicated provider for History calls.
+// Deprecated: use NewWithChain with a HistoryChain instead.
 func (s *Service) WithHistoryProvider(h domain.HistoryProvider) *Service {
 	s.HistoryProv = h
 	return s
@@ -49,9 +81,8 @@ func (s *Service) WithHistoryProvider(h domain.HistoryProvider) *Service {
 // without hitting the provider; otherwise the cache is bypassed for reads but
 // still written on success.
 //
-// Graceful degradation: if the provider returns a transient error (network,
-// unavailable, rate-limited) and a cached entry exists (even if stale), the
-// cached value is returned with Source=SourceCache and an attached warning.
+// Graceful degradation: if all providers return transient errors and a cached
+// entry exists (even if stale), the cached value is returned with Source=SourceCache.
 func (s *Service) Get(ctx context.Context, sym domain.Ticker, force bool) (domain.Quote, error) {
 	sym = domain.Ticker(strings.ToUpper(strings.TrimSpace(string(sym))))
 	if sym == "" {
@@ -70,7 +101,8 @@ func (s *Service) Get(ctx context.Context, sym domain.Ticker, force bool) (domai
 		if err := s.Limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
-		q, err := s.Provider.Quote(ctx, sym)
+
+		q, err := s.quoteFromChain(ctx, sym)
 		if err != nil {
 			// On transient errors, fall back to stale cache if any.
 			if isTransient(err) {
@@ -89,17 +121,36 @@ func (s *Service) Get(ctx context.Context, sym domain.Ticker, force bool) (domai
 	return v.(domain.Quote), nil
 }
 
-// History is a thin passthrough; it is rate-limited but not cached.
-// When HistoryProv is set, it takes precedence over Provider — this lets
-// us combine Finnhub quotes with a free chart source (e.g. Yahoo).
+// quoteFromChain delegates to the Chain if set, otherwise uses Provider.
+func (s *Service) quoteFromChain(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
+	if s.Chain != nil && s.Chain.Len() > 0 {
+		return s.Chain.Quote(ctx, sym)
+	}
+	if s.Provider != nil {
+		return s.Provider.Quote(ctx, sym)
+	}
+	return domain.Quote{}, fmt.Errorf("%w: no providers configured", domain.ErrNoAPIKey)
+}
+
+// History returns candles. Uses HistoryChain if set, then HistoryProv, then Provider.
 func (s *Service) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
 	if err := s.Limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
+
+	if s.HistoryChain != nil {
+		return s.HistoryChain.History(ctx, sym, r)
+	}
 	if s.HistoryProv != nil {
 		return s.HistoryProv.History(ctx, sym, r)
 	}
-	return s.Provider.History(ctx, sym, r)
+	if s.Chain != nil && s.Chain.Len() > 0 {
+		return s.Chain.History(ctx, sym, r)
+	}
+	if s.Provider != nil {
+		return s.Provider.History(ctx, sym, r)
+	}
+	return nil, fmt.Errorf("%w: no history providers configured", domain.ErrNoAPIKey)
 }
 
 // freshCached returns a cached quote whose FetchedAt is within TTL.

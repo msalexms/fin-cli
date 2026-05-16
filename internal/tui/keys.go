@@ -9,6 +9,7 @@ type KeyMap struct {
 	Refresh key.Binding
 	Add     key.Binding
 	Delete  key.Binding
+	Sort    key.Binding
 	Help    key.Binding
 	Quit    key.Binding
 
@@ -22,11 +23,11 @@ func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Up: key.NewBinding(
 			key.WithKeys("up", "k"),
-			key.WithHelp("↑/k", "up"),
+			key.WithHelp("\u2191/k", "up"),
 		),
 		Down: key.NewBinding(
 			key.WithKeys("down", "j"),
-			key.WithHelp("↓/j", "down"),
+			key.WithHelp("\u2193/j", "down"),
 		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
@@ -39,6 +40,10 @@ func DefaultKeyMap() KeyMap {
 		Delete: key.NewBinding(
 			key.WithKeys("d"),
 			key.WithHelp("d", "del"),
+		),
+		Sort: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "sort"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -61,5 +66,5 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp renders a compact help line for the footer.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Refresh, k.Add, k.Delete, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Refresh, k.Add, k.Delete, k.Sort, k.Quit}
 }

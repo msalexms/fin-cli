@@ -10,6 +10,7 @@ import (
 
 	"fin-cli/internal/chart"
 	"fin-cli/internal/domain"
+	"fin-cli/internal/format"
 )
 
 // View renders the current state. It is called on every tick.
@@ -74,7 +75,7 @@ func (m *Model) nextPollText() string {
 	if remaining < 0 {
 		remaining = 0
 	}
-	return m.styles.Label.Render(fmt.Sprintf("next poll %s", shortDuration(remaining)))
+	return m.styles.Label.Render(fmt.Sprintf("next poll %s", format.ShortDuration(remaining)))
 }
 
 // --------- footer ---------
@@ -118,14 +119,15 @@ func (m *Model) renderFooter(w int) string {
 	}
 
 	// 3) Default help line.
-	sep := st.HelpSep.Render("  ·  ")
+	sep := st.HelpSep.Render("  \u00B7  ")
 	sp := st.Base.Render(" ")
 	parts := []string{
-		st.HelpKey.Render("↑/k") + sp + st.HelpDesc.Render("up"),
-		st.HelpKey.Render("↓/j") + sp + st.HelpDesc.Render("down"),
+		st.HelpKey.Render("\u2191/k") + sp + st.HelpDesc.Render("up"),
+		st.HelpKey.Render("\u2193/j") + sp + st.HelpDesc.Render("down"),
 		st.HelpKey.Render("r") + sp + st.HelpDesc.Render("refresh"),
 		st.HelpKey.Render("a") + sp + st.HelpDesc.Render("add"),
 		st.HelpKey.Render("d") + sp + st.HelpDesc.Render("del"),
+		st.HelpKey.Render("s") + sp + st.HelpDesc.Render("sort"),
 		st.HelpKey.Render("q") + sp + st.HelpDesc.Render("quit"),
 	}
 	return st.FooterBar.Width(w).Render(joinWith(parts, sep))
@@ -192,11 +194,16 @@ func (m *Model) renderSidebar(w, h int) string {
 	// Render title and separator at exactly `inner` width so JoinVertical does
 	// not pad them with unstyled spaces — which would bleed through as the
 	// terminal default background.
-	title := st.PaneTitle.Width(inner).Render("WATCHLIST")
-	sep := st.Subtle.Width(inner).Render(strings.Repeat("─", inner))
+	titleLabel := "WATCHLIST"
+	if m.sortMode != SortManual {
+		titleLabel += " [" + m.sortMode.String() + "]"
+	}
+	title := st.PaneTitle.Width(inner).Render(titleLabel)
+	sep := st.Subtle.Width(inner).Render(strings.Repeat("\u2500", inner))
 
+	sorted := m.sortedTickers()
 	var rows []string
-	for i, t := range m.tickers {
+	for i, t := range sorted {
 		rows = append(rows, m.renderSidebarRow(t, i == m.selected, inner))
 	}
 
@@ -212,11 +219,17 @@ func (m *Model) renderSidebarRow(t domain.Ticker, selected bool, width int) stri
 	st := m.styles
 	var marker, sym string
 	if selected {
-		marker = st.Title.Render("▌")
+		marker = st.Title.Render("\u258C")
 		sym = st.SidebarSelected.Render(string(t))
 	} else {
 		marker = st.Base.Render(" ")
 		sym = st.SidebarRow.Render(string(t))
+	}
+
+	// Sparkline (5-day mini chart).
+	spark := ""
+	if data, ok := m.sparklines[t]; ok && len(data) > 1 {
+		spark = st.Label.Render(miniSparkline(data))
 	}
 
 	var right string
@@ -231,13 +244,21 @@ func (m *Model) renderSidebarRow(t domain.Ticker, selected bool, width int) stri
 	}
 
 	leftW := lipgloss.Width(marker) + 1 + lipgloss.Width(sym)
+	sparkW := lipgloss.Width(spark)
 	rightW := lipgloss.Width(right)
-	pad := width - leftW - rightW
+	usedW := leftW + sparkW + rightW
+	if sparkW > 0 {
+		usedW += 1 // gap before sparkline
+	}
+	pad := width - usedW
 	if pad < 1 {
 		pad = 1
 	}
 	gap1 := st.Base.Render(" ")
 	gap2 := st.Base.Render(strings.Repeat(" ", pad))
+	if spark != "" {
+		return marker + gap1 + sym + gap2 + spark + st.Base.Render(" ") + right
+	}
 	return marker + gap1 + sym + gap2 + right
 }
 
@@ -352,19 +373,7 @@ func joinWith(ss []string, sep string) string {
 }
 
 func (m *Model) detailStatsGrid(q domain.Quote, w int) string {
-	p := m.app.Printer
-	rows := [][2]string{
-		{"Prev Close", p.Sprintf("%.2f", q.PrevClose)},
-		{"Open", optFloat(p, q.Open)},
-		{"Day Range", rangeStr(p, q.DayLow, q.DayHigh)},
-		{"52w Range", rangeStr(p, q.Week52Low, q.Week52High)},
-		{"Volume", formatVolume(q.Volume)},
-		{"Market Cap", formatMarketCap(q.MarketCap, q.Currency)},
-		{"P/E", optFloat(p, q.PE)},
-		{"EPS", optFloat(p, q.EPS)},
-		{"Beta", optFloat(p, q.Beta)},
-		{"Div Yield", optPercent(p, q.DivYield)},
-	}
+	rows := format.StatsRows(q, m.app.Printer)
 	return m.twoColGrid(rows, w)
 }
 
@@ -461,51 +470,28 @@ func (m *Model) renderErrorDetail(t domain.Ticker, err error, w int) string {
 
 func (m *Model) sourceBadge(q domain.Quote) (string, string) {
 	st := m.styles
+	badge, provider := format.SourceBadge(q)
+	var styledBadge string
 	switch q.Source {
 	case domain.SourceCache:
-		return st.BadgeCache.Render("[~]"), "cached " + q.FetchedAt.Local().Format("15:04")
-	case domain.SourceFinnhub:
+		styledBadge = st.BadgeCache.Render(badge)
+	default:
 		if q.Partial {
-			return st.BadgePartial.Render("[!]"), "via finnhub (partial)"
+			styledBadge = st.BadgePartial.Render(badge)
+		} else {
+			styledBadge = st.BadgeFresh.Render(badge)
 		}
-		return st.BadgeFresh.Render("[*]"), "via finnhub"
 	}
-	return st.BadgeCache.Render("[*]"), "via " + string(q.Source)
+	return styledBadge, provider
 }
 
 func (m *Model) sessionLabel(q domain.Quote) string {
-	switch q.Session {
-	case domain.SessionPre:
-		return "pre-market"
-	case domain.SessionRegular:
-		return "regular"
-	case domain.SessionPost:
-		return "after-hours"
-	case domain.SessionClosed:
-		return "closed"
-	}
-	return ""
+	return format.SessionLabel(q.Session)
 }
 
 func (m *Model) formatChange(q domain.Quote) (arrow, body string) {
-	p := m.app.Printer
-	arrow = "•"
-	if q.Change > 0 {
-		arrow = "▲"
-	} else if q.Change < 0 {
-		arrow = "▼"
-	}
-	if m.app.ASCIIOnly {
-		switch arrow {
-		case "▲":
-			arrow = "^"
-		case "▼":
-			arrow = "v"
-		default:
-			arrow = "."
-		}
-	}
-	body = p.Sprintf("%+.2f (%+.2f%%)", q.Change, q.ChangePct)
+	arrow = format.ChangeArrow(q.Change, m.app.ASCIIOnly)
+	body = format.ChangeBody(m.app.Printer, q.Change, q.ChangePct)
 	return
 }
 
@@ -522,72 +508,6 @@ func (m *Model) colorizeChange(s string, change float64) string {
 
 // --- formatting primitives ---
 
-type printer interface {
-	Sprintf(string, ...any) string
-}
-
-func optFloat(p printer, o domain.Optional[float64]) string {
-	if !o.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f", o.Value)
-}
-
-func optPercent(p printer, o domain.Optional[float64]) string {
-	if !o.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f%%", o.Value)
-}
-
-func rangeStr(p printer, lo, hi domain.Optional[float64]) string {
-	if !lo.Valid || !hi.Valid {
-		return "—"
-	}
-	return p.Sprintf("%.2f – %.2f", lo.Value, hi.Value)
-}
-
-func formatVolume(v domain.Optional[int64]) string {
-	if !v.Valid {
-		return "—"
-	}
-	return humanizeInt(v.Value)
-}
-
-func formatMarketCap(m domain.Optional[float64], cur string) string {
-	if !m.Valid {
-		return "—"
-	}
-	// Finnhub returns the figure in millions of the reporting currency.
-	return humanizeMillions(m.Value) + " " + cur
-}
-
-// humanizeMillions turns 1_234_567 (expressed as "millions of units" from the
-// API) into a compact string like "1.23T".
-func humanizeMillions(v float64) string {
-	switch {
-	case v >= 1_000_000:
-		return fmt.Sprintf("%.2fT", v/1_000_000)
-	case v >= 1_000:
-		return fmt.Sprintf("%.2fB", v/1_000)
-	default:
-		return fmt.Sprintf("%.2fM", v)
-	}
-}
-
-func humanizeInt(n int64) string {
-	switch {
-	case n >= 1_000_000_000:
-		return fmt.Sprintf("%.2fB", float64(n)/1_000_000_000)
-	case n >= 1_000_000:
-		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
-	case n >= 1_000:
-		return fmt.Sprintf("%.2fK", float64(n)/1_000)
-	default:
-		return fmt.Sprintf("%d", n)
-	}
-}
-
 func padRight(s string, n int) string {
 	w := lipgloss.Width(s)
 	if w >= n {
@@ -603,13 +523,6 @@ func centerVert(s string, h int) string {
 		return s
 	}
 	return strings.Repeat("\n", pad) + s
-}
-
-func shortDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	return fmt.Sprintf("%dm", int(d.Minutes()))
 }
 
 func explainError(err error) string {
@@ -629,4 +542,43 @@ func explainError(err error) string {
 	default:
 		return err.Error()
 	}
+}
+
+// miniSparkline renders a tiny 5-char sparkline using Unicode block characters.
+// Input: slice of float64 close prices (typically 5 values).
+func miniSparkline(data []float64) string {
+	if len(data) == 0 {
+		return ""
+	}
+	blocks := []rune{'\u2581', '\u2582', '\u2583', '\u2584', '\u2585', '\u2586', '\u2587', '\u2588'}
+	min, max := data[0], data[0]
+	for _, v := range data[1:] {
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+	spread := max - min
+	if spread == 0 {
+		// Flat data: render all as mid-level blocks.
+		r := make([]rune, len(data))
+		for i := range r {
+			r[i] = blocks[3]
+		}
+		return string(r)
+	}
+	r := make([]rune, len(data))
+	for i, v := range data {
+		idx := int(((v - min) / spread) * float64(len(blocks)-1))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(blocks) {
+			idx = len(blocks) - 1
+		}
+		r[i] = blocks[idx]
+	}
+	return string(r)
 }

@@ -27,9 +27,12 @@ func None[T any]() Optional[T] { return Optional[T]{} }
 type QuoteSource string
 
 const (
-	SourceFinnhub QuoteSource = "finnhub"
-	SourceCache   QuoteSource = "cache"
-	SourceUnknown QuoteSource = "unknown"
+	SourceFinnhub      QuoteSource = "finnhub"
+	SourceYahoo        QuoteSource = "yahoo"
+	SourceTwelveData   QuoteSource = "twelvedata"
+	SourceAlphaVantage QuoteSource = "alphavantage"
+	SourceCache        QuoteSource = "cache"
+	SourceUnknown      QuoteSource = "unknown"
 )
 
 // MarketSession indicates whether the quote is pre-market, regular, or after-hours.
@@ -115,6 +118,9 @@ type Range struct {
 
 // DefaultRange is ~30 calendar days ≈ 22 sessions.
 var DefaultRange = Range{Sessions: 22, Resolution: ResolutionDaily}
+
+// Range5D is ~5 trading days (one business week), used for sparklines.
+var Range5D = Range{Sessions: 5, Resolution: ResolutionDaily}
 
 // IsISIN reports whether s matches the ISIN format (12 chars, 2 letters + 9 alnum + 1 digit).
 func IsISIN(s string) bool {
