@@ -15,7 +15,15 @@ import (
 
 // Run starts the Bubbletea program. It returns after the user quits.
 func Run(ctx context.Context, app *cli.App) error {
-	m := newModel(ctx, app)
+	deps := Deps{
+		Quotes:      app.Quotes,
+		Watchlist:   app.Watchlist,
+		Resolver:    app,
+		Printer:     app.Printer,
+		ASCIIOnly:   app.ASCIIOnly,
+		PollSeconds: int(app.Config.PollingInterval.Std().Seconds()),
+	}
+	m := newModel(ctx, deps, app.Config.UI.SortMode)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
@@ -23,7 +31,7 @@ func Run(ctx context.Context, app *cli.App) error {
 
 // Init loads the watchlist, kicks off fetches, and schedules the polling tick.
 func (m *Model) Init() tea.Cmd {
-	ts, err := m.app.Watchlist.Load()
+	ts, err := m.deps.Watchlist.Load()
 	if err != nil {
 		m.globalErr = err
 		return m.sp.Tick
@@ -33,19 +41,18 @@ func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.sp.Tick}
 	for _, t := range m.tickers {
 		m.loading[t] = true
-		cmds = append(cmds, fetchQuoteCmd(m.ctx, m.app.Quotes, t, false))
-		cmds = append(cmds, fetchSparklineCmd(m.ctx, m.app.Quotes, t))
+		cmds = append(cmds, fetchQuoteCmd(m.ctx, m.deps.Quotes, t, false))
+		cmds = append(cmds, fetchSparklineCmd(m.ctx, m.deps.Quotes, t))
 	}
 	cmds = append(cmds, pollTickCmd(m.pollInterval()))
 	return tea.Batch(cmds...)
 }
 
 func (m *Model) pollInterval() time.Duration {
-	d := m.app.Config.PollingInterval.Std()
-	if d <= 0 {
-		d = 5 * time.Minute
+	if m.deps.PollSeconds > 0 {
+		return time.Duration(m.deps.PollSeconds) * time.Second
 	}
-	return d
+	return 5 * time.Minute
 }
 
 // Update is the Bubbletea reducer.
@@ -87,19 +94,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.setStatus(false, "add failed: "+explainError(msg.Err))
 			}
-			// Stay in input mode so the user can correct and retry.
 			return m, nil
 		}
-		// Success: append to list, cache quote, exit input mode.
 		m.tickers = append(m.tickers, msg.Ticker)
 		m.quotes[msg.Ticker] = msg.Quote
 		m.selected = len(m.tickers) - 1
 		m.exitInput()
 		m.setStatus(true, "added "+string(msg.Ticker))
-		// Kick fetches for history and sparkline.
 		return m, tea.Batch(
-			fetchQuoteCmd(m.ctx, m.app.Quotes, msg.Ticker, false),
-			fetchSparklineCmd(m.ctx, m.app.Quotes, msg.Ticker),
+			fetchQuoteCmd(m.ctx, m.deps.Quotes, msg.Ticker, false),
+			fetchSparklineCmd(m.ctx, m.deps.Quotes, msg.Ticker),
 		)
 
 	case deleteResultMsg:
@@ -119,22 +123,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			m.loading[t] = true
-			cmds = append(cmds, fetchQuoteCmd(m.ctx, m.app.Quotes, t, true))
-			cmds = append(cmds, fetchSparklineCmd(m.ctx, m.app.Quotes, t))
+			cmds = append(cmds, fetchQuoteCmd(m.ctx, m.deps.Quotes, t, true))
+			cmds = append(cmds, fetchSparklineCmd(m.ctx, m.deps.Quotes, t))
 		}
 		cmds = append(cmds, pollTickCmd(m.pollInterval()))
 		m.lastTick = time.Now()
 		return m, tea.Batch(cmds...)
 	}
 
-	// Any other msg: feed to the spinner so it keeps animating while loading.
 	var cmd tea.Cmd
 	m.sp, cmd = m.sp.Update(msg)
 	return m, cmd
 }
 
 func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Input mode intercepts most keys.
 	if m.mode == modeAdd {
 		switch {
 		case keyMatches(m.keys.Cancel, msg):
@@ -146,14 +148,13 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.busy = true
 			m.setStatus(true, "")
-			return m, addTickerCmd(m.ctx, m.app, m.input.Value())
+			return m, addTickerCmd(m.ctx, m.deps, m.input.Value())
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
 	}
 
-	// List mode.
 	switch {
 	case keyMatches(m.keys.Quit, msg):
 		return m, tea.Quit
@@ -176,7 +177,7 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.loading[t] = true
-		return m, fetchQuoteCmd(m.ctx, m.app.Quotes, t, true)
+		return m, fetchQuoteCmd(m.ctx, m.deps.Quotes, t, true)
 	case keyMatches(m.keys.Add, msg):
 		m.enterInput()
 		return m, nil
@@ -186,7 +187,7 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		t := m.tickers[m.selected]
 		m.busy = true
-		return m, deleteTickerCmd(m.app, t)
+		return m, deleteTickerCmd(m.deps, t)
 	case keyMatches(m.keys.Sort, msg):
 		m.sortMode = (m.sortMode + 1) % SortMode(sortModeCount)
 		m.setStatus(true, "sort: "+m.sortMode.String())
@@ -196,27 +197,21 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // sortedTickers returns the tickers list sorted according to m.sortMode.
-// It does NOT modify m.tickers (which preserves insertion order for persistence).
 func (m *Model) sortedTickers() []domain.Ticker {
 	if m.sortMode == SortManual || len(m.tickers) <= 1 {
 		return m.tickers
 	}
-
 	sorted := make([]domain.Ticker, len(m.tickers))
 	copy(sorted, m.tickers)
 
 	switch m.sortMode {
 	case SortChangeDesc:
 		sort.Slice(sorted, func(i, j int) bool {
-			qi := m.quotes[sorted[i]]
-			qj := m.quotes[sorted[j]]
-			return qi.ChangePct > qj.ChangePct
+			return m.quotes[sorted[i]].ChangePct > m.quotes[sorted[j]].ChangePct
 		})
 	case SortChangeAsc:
 		sort.Slice(sorted, func(i, j int) bool {
-			qi := m.quotes[sorted[i]]
-			qj := m.quotes[sorted[j]]
-			return qi.ChangePct < qj.ChangePct
+			return m.quotes[sorted[i]].ChangePct < m.quotes[sorted[j]].ChangePct
 		})
 	case SortAlpha:
 		sort.Slice(sorted, func(i, j int) bool {
@@ -224,8 +219,7 @@ func (m *Model) sortedTickers() []domain.Ticker {
 		})
 	case SortVolume:
 		sort.Slice(sorted, func(i, j int) bool {
-			vi := int64(0)
-			vj := int64(0)
+			vi, vj := int64(0), int64(0)
 			if q, ok := m.quotes[sorted[i]]; ok && q.Volume.Valid {
 				vi = q.Volume.Value
 			}
@@ -267,7 +261,6 @@ func (m *Model) setStatus(ok bool, s string) {
 	m.statusOK = ok
 }
 
-// removeTickerFromModel keeps the selected index valid after deletion.
 func (m *Model) removeTickerFromModel(t domain.Ticker) {
 	idx := -1
 	for i, x := range m.tickers {

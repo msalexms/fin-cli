@@ -3,17 +3,15 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 // Palette collects the semantic colors used across the TUI.
-// The "OpenCode" aesthetic: absolute black background, a single grey scale,
-// and two semantic accents (green for up, red for down).
 type Palette struct {
-	Bg         lipgloss.Color // background
-	Base       lipgloss.Color // primary text
-	Label      lipgloss.Color // secondary/muted text
-	Subtle     lipgloss.Color // borders, dividers
-	VerySubtle lipgloss.Color // scrollbars, placeholder dots
-	Up         lipgloss.Color // positive delta
-	Down       lipgloss.Color // negative delta
-	Accent     lipgloss.Color // accents, title block
+	Bg         lipgloss.Color
+	Base       lipgloss.Color
+	Label      lipgloss.Color
+	Subtle     lipgloss.Color
+	VerySubtle lipgloss.Color
+	Up         lipgloss.Color
+	Down       lipgloss.Color
+	Accent     lipgloss.Color
 }
 
 // DefaultPalette is the strict OpenCode palette.
@@ -28,8 +26,7 @@ var DefaultPalette = Palette{
 	Accent:     lipgloss.Color("#E0E0E0"),
 }
 
-// Styles holds the precomputed lipgloss styles used across the TUI.
-// Constructed once per session from a Palette and reused.
+// Styles holds the precomputed lipgloss styles.
 type Styles struct {
 	P Palette
 
@@ -43,6 +40,7 @@ type Styles struct {
 	Up      lipgloss.Style
 	Down    lipgloss.Style
 	Neutral lipgloss.Style
+	Accent  lipgloss.Style
 
 	// Chrome
 	HeaderBar lipgloss.Style
@@ -83,6 +81,7 @@ func NewStyles(p Palette) Styles {
 		Up:      base.Foreground(p.Up),
 		Down:    base.Foreground(p.Down),
 		Neutral: base.Foreground(p.Label),
+		Accent:  base.Foreground(p.Accent).Bold(true),
 
 		HeaderBar: base.
 			Padding(0, 1).

@@ -13,7 +13,14 @@ import (
 // NewPreviewModel builds a TUI Model pre-populated with the given quotes and
 // ready to render via View(). Intended for previews/tests only.
 func NewPreviewModel(app *cli.App, width, height int, quotes []domain.Quote) *Model {
-	m := newModel(context.Background(), app)
+	deps := Deps{
+		Quotes:    app.Quotes,
+		Watchlist: app.Watchlist,
+		Resolver:  app,
+		Printer:   app.Printer,
+		ASCIIOnly: app.ASCIIOnly,
+	}
+	m := newModel(context.Background(), deps, app.Config.UI.SortMode)
 	m.width = width
 	m.height = height
 	m.ready = true
@@ -25,8 +32,6 @@ func NewPreviewModel(app *cli.App, width, height int, quotes []domain.Quote) *Mo
 	if len(m.tickers) > 0 {
 		m.selected = 0
 	}
-	// Seed a synthetic candle series for the selected ticker so the chart
-	// pane is exercised.
 	if len(m.tickers) > 0 {
 		sym := m.tickers[0]
 		now := time.Now().UTC()

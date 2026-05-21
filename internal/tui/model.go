@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 
-	"fin-cli/internal/cli"
 	"fin-cli/internal/domain"
 )
 
@@ -15,9 +14,8 @@ import (
 type mode int
 
 const (
-	modeList    mode = iota // browsing the watchlist
-	modeAdd                 // text input to add a ticker/ISIN
-	modeConfirm             // confirm delete
+	modeList mode = iota // browsing the watchlist
+	modeAdd              // text input to add a ticker/ISIN
 )
 
 // SortMode controls how the watchlist sidebar is sorted.
@@ -35,12 +33,10 @@ const (
 // String returns a short label for the sort mode.
 func (s SortMode) String() string {
 	switch s {
-	case SortManual:
-		return "manual"
 	case SortChangeDesc:
-		return "%change"
+		return "%desc"
 	case SortChangeAsc:
-		return "%change asc"
+		return "%asc"
 	case SortAlpha:
 		return "alpha"
 	case SortVolume:
@@ -52,8 +48,8 @@ func (s SortMode) String() string {
 
 // Model is the Bubbletea model of the interactive dashboard.
 type Model struct {
-	ctx context.Context
-	app *cli.App
+	ctx  context.Context
+	deps Deps
 
 	styles Styles
 	keys   KeyMap
@@ -85,7 +81,7 @@ type Model struct {
 	busy     bool   // validating an add/delete
 }
 
-func newModel(ctx context.Context, app *cli.App) *Model {
+func newModel(ctx context.Context, deps Deps, initialSort string) *Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	st := NewStyles(DefaultPalette)
@@ -100,12 +96,9 @@ func newModel(ctx context.Context, app *cli.App) *Model {
 	in.TextStyle = st.Base
 	in.PlaceholderStyle = st.Subtle
 
-	// Parse initial sort mode from config.
-	initialSort := parseSortMode(app.Config.UI.SortMode)
-
 	return &Model{
 		ctx:        ctx,
-		app:        app,
+		deps:       deps,
 		styles:     st,
 		keys:       DefaultKeyMap(),
 		sp:         s,
@@ -116,15 +109,15 @@ func newModel(ctx context.Context, app *cli.App) *Model {
 		loading:    make(map[domain.Ticker]bool),
 		errs:       make(map[domain.Ticker]error),
 		lastTick:   time.Now(),
-		sortMode:   initialSort,
+		sortMode:   parseSortMode(initialSort),
 	}
 }
 
 func parseSortMode(s string) SortMode {
 	switch s {
-	case "change_desc":
+	case "change_desc", "%desc":
 		return SortChangeDesc
-	case "change_asc":
+	case "change_asc", "%asc":
 		return SortChangeAsc
 	case "alpha":
 		return SortAlpha
