@@ -1,0 +1,40 @@
+version: 2
+
+builds:
+  - id: fin-cli
+    main: ./cmd/fin-cli
+    binary: fin-cli
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "7"
+    ldflags:
+      - "-s -w -trimpath -X fin-cli/internal/version.Version={{ .Version }} -X fin-cli/internal/version.Commit={{ .Commit }} -X fin-cli/internal/version.Date={{ .Date }}"
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - format: tar.gz
+    name_template: "fin-cli_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - package_name: fin-cli
+    file_name_template: "fin-cli_{{ .Version }}_{{ .Arch }}"
+    formats:
+      - deb
+      - rpm
+    vendor: "msalexms"
+    homepage: "https://github.com/msalexms/fin-cli"
+    maintainer: "Alejandro Martin <amstech04@gmail.com>"
+    description: "Minimalist terminal financial monitor with TUI dashboard"
+    license: "MIT"
+
+changelog:
+  sort: asc
