@@ -32,6 +32,9 @@ Thumbs.db
 # Local config overrides (if any)
 .env
 
+# Agent instructions (local only, not for GitHub)
+AGENTS.md
+.opencode/
+
 # VHS demo
 demo.tape
-*.gif
