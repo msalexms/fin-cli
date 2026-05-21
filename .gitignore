@@ -24,6 +24,12 @@ profile.cov
 go.work
 go.work.sum
 
+# Build output
+/fin-cli
+
+# Agent instructions (not project source)
+AGENTS.md
+
 # env file
 .env
 
