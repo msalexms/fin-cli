@@ -64,9 +64,9 @@ Opens a full-screen dashboard with your watchlist on the left and instrument det
 
 ```bash
 fin-cli quote AAPL
-fin-cli quote MSFT GOOGL
 fin-cli quote US0378331005        # ISIN autodetected
 fin-cli quote --isin <ISIN>       # explicit ISIN
+fin-cli quote --format=json AAPL  # JSON output
 ```
 
 ### Watchlist management
@@ -127,14 +127,13 @@ sort_mode = ""              # "manual" | "%desc" | "%asc" | "alpha" | "volume"
 
 ## Providers
 
-| Provider | Role | Free tier | Notes |
-|---|---|---|---|
-| **Finnhub** | Quote + fundamentals | 60 req/min | Primary provider; no candles on free tier |
-| **Yahoo** | History (chart) | Unlimited | Unofficial; best-effort; degrades gracefully |
-| **Yahoo** | Quote fallback | Unlimited | Partial data (no P/E, EPS, Beta) |
-| **Twelve Data** | Quote + History | 800 req/day | Partial quotes; requires free API key |
-| **Alpha Vantage** | Quote + History | 25 req/day | Last-resort fallback; harsh daily limit |
-| **OpenFIGI** | ISIN resolution | 25 req/min | No key needed; 250 req/min with key |
+| Provider | Role | Notes |
+|---|---|---|
+| **Finnhub** | Quote + fundamentals | Primary provider; no candles on free tier |
+| **Yahoo** | History (chart) + quote fallback | Unofficial; best-effort; partial data as quote fallback |
+| **Twelve Data** | Quote + History | Partial quotes; requires free API key |
+| **Alpha Vantage** | Quote + History | Last-resort fallback; harsh daily limit |
+| **OpenFIGI** | ISIN resolution | No key needed; higher limit with key |
 
 Provider chains are configurable. Transient errors (network, rate limit, 5xx) advance to the next provider. Terminal errors (not found, bad key) stop the chain.
 
