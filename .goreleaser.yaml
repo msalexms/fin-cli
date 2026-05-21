@@ -12,8 +12,10 @@ builds:
       - arm
     goarm:
       - "7"
+    flags:
+      - -trimpath
     ldflags:
-      - "-s -w -trimpath -X fin-cli/internal/version.Version={{ .Version }} -X fin-cli/internal/version.Commit={{ .Commit }} -X fin-cli/internal/version.Date={{ .Date }}"
+      - "-s -w -X fin-cli/internal/version.Version={{ .Version }} -X fin-cli/internal/version.Commit={{ .Commit }} -X fin-cli/internal/version.Date={{ .Date }}"
     env:
       - CGO_ENABLED=0
 
