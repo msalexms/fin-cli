@@ -19,6 +19,7 @@ func Run(ctx context.Context, app *cli.App) error {
 		Quotes:      app.Quotes,
 		Watchlist:   app.Watchlist,
 		Resolver:    app,
+		Config:      app,
 		Printer:     app.Printer,
 		ASCIIOnly:   app.ASCIIOnly,
 		PollSeconds: int(app.Config.PollingInterval.Std().Seconds()),
@@ -137,6 +138,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == modeSettings {
+		return m.onSettingsKey(msg)
+	}
+
 	if m.mode == modeAdd {
 		switch {
 		case keyMatches(m.keys.Cancel, msg):
@@ -191,6 +196,11 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyMatches(m.keys.Sort, msg):
 		m.sortMode = (m.sortMode + 1) % SortMode(sortModeCount)
 		m.setStatus(true, "sort: "+m.sortMode.String())
+		return m, nil
+	case keyMatches(m.keys.Settings, msg):
+		m.mode = modeSettings
+		m.settingsCursor = 0
+		m.settingsEditing = false
 		return m, nil
 	}
 	return m, nil

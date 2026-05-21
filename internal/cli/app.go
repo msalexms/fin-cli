@@ -193,6 +193,18 @@ func (a *App) RenderOptions() RenderOptions {
 // HasFinnhubKey reports whether an API key is configured.
 func (a *App) HasFinnhubKey() bool { return a.finnhubKey != "" }
 
+// GetConfig returns the current in-memory configuration.
+func (a *App) GetConfig() config.Config { return a.Config }
+
+// SetConfig persists cfg to disk and updates the in-memory copy.
+func (a *App) SetConfig(cfg config.Config) error {
+	if err := config.Save(a.Paths.ConfigFile, cfg); err != nil {
+		return err
+	}
+	a.Config = cfg
+	return nil
+}
+
 // ResolveInput returns the ticker to query, honoring --isin and autodetection.
 // If arg looks like an ISIN (or forceISIN is true), it is resolved via the
 // ISIN service; otherwise the argument is used verbatim as a ticker.

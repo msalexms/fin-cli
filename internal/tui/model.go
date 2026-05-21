@@ -14,8 +14,9 @@ import (
 type mode int
 
 const (
-	modeList mode = iota // browsing the watchlist
-	modeAdd              // text input to add a ticker/ISIN
+	modeList     mode = iota // browsing the watchlist
+	modeAdd                  // text input to add a ticker/ISIN
+	modeSettings             // settings panel
 )
 
 // SortMode controls how the watchlist sidebar is sorted.
@@ -79,6 +80,11 @@ type Model struct {
 	status   string // transient message shown in the footer
 	statusOK bool   // green if true, red otherwise
 	busy     bool   // validating an add/delete
+
+	// Settings panel state
+	settingsCursor int
+	settingsInput  textinput.Model
+	settingsEditing bool
 }
 
 func newModel(ctx context.Context, deps Deps, initialSort string) *Model {
@@ -96,20 +102,29 @@ func newModel(ctx context.Context, deps Deps, initialSort string) *Model {
 	in.TextStyle = st.Base
 	in.PlaceholderStyle = st.Subtle
 
+	si := textinput.New()
+	si.Prompt = "\u203A "
+	si.CharLimit = 64
+	si.Width = 40
+	si.PromptStyle = st.Title
+	si.TextStyle = st.Base
+	si.PlaceholderStyle = st.Subtle
+
 	return &Model{
-		ctx:        ctx,
-		deps:       deps,
-		styles:     st,
-		keys:       DefaultKeyMap(),
-		sp:         s,
-		input:      in,
-		quotes:     make(map[domain.Ticker]domain.Quote),
-		candles:    make(map[domain.Ticker][]domain.Candle),
-		sparklines: make(map[domain.Ticker][]float64),
-		loading:    make(map[domain.Ticker]bool),
-		errs:       make(map[domain.Ticker]error),
-		lastTick:   time.Now(),
-		sortMode:   parseSortMode(initialSort),
+		ctx:           ctx,
+		deps:          deps,
+		styles:        st,
+		keys:          DefaultKeyMap(),
+		sp:            s,
+		input:         in,
+		settingsInput: si,
+		quotes:        make(map[domain.Ticker]domain.Quote),
+		candles:       make(map[domain.Ticker][]domain.Candle),
+		sparklines:    make(map[domain.Ticker][]float64),
+		loading:       make(map[domain.Ticker]bool),
+		errs:          make(map[domain.Ticker]error),
+		lastTick:      time.Now(),
+		sortMode:      parseSortMode(initialSort),
 	}
 }
 

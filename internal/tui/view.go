@@ -36,6 +36,9 @@ func (m *Model) View() string {
 
 // renderBody dispatches to the appropriate layout based on terminal width.
 func (m *Model) renderBody(w, h int) string {
+	if m.mode == modeSettings {
+		return m.renderSettings(w, h)
+	}
 	if len(m.tickers) == 0 {
 		return m.renderEmpty(w, h)
 	}

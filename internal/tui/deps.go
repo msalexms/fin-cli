@@ -3,25 +3,19 @@ package tui
 import (
 	"context"
 
+	"fin-cli/internal/config"
 	"fin-cli/internal/domain"
 	"fin-cli/internal/locale"
 )
 
 // Deps abstracts the application services the TUI needs.
-// This decouples the TUI from the concrete cli.App type, enabling
-// isolated testing and cleaner dependency boundaries.
 type Deps struct {
-	// Quotes fetches and caches market data.
-	Quotes QuotesFetcher
-	// Watchlist manages the persisted ticker list.
-	Watchlist WatchlistStore
-	// Resolver maps raw user input (ticker or ISIN) to a Ticker.
-	Resolver InputResolver
-	// Printer provides locale-aware number formatting.
-	Printer locale.Printer
-	// ASCIIOnly disables Unicode glyphs when true.
-	ASCIIOnly bool
-	// PollingInterval as seconds; 0 means default (300s).
+	Quotes      QuotesFetcher
+	Watchlist   WatchlistStore
+	Resolver    InputResolver
+	Config      ConfigStore
+	Printer     locale.Printer
+	ASCIIOnly   bool
 	PollSeconds int
 }
 
@@ -41,4 +35,10 @@ type WatchlistStore interface {
 // InputResolver resolves raw user input to a domain.Ticker.
 type InputResolver interface {
 	ResolveInput(ctx context.Context, raw string, forceISIN bool) (domain.Ticker, error)
+}
+
+// ConfigStore provides read/write access to the persistent configuration.
+type ConfigStore interface {
+	GetConfig() config.Config
+	SetConfig(cfg config.Config) error
 }

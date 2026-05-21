@@ -5,6 +5,19 @@ import "github.com/charmbracelet/lipgloss"
 func (m *Model) renderFooter(w int) string {
 	st := m.styles
 
+	if m.mode == modeSettings {
+		if m.status != "" {
+			col := st.Up
+			if !m.statusOK {
+				col = st.Down
+			}
+			return st.FooterBar.Width(w).Render(col.Render(m.status))
+		}
+		return st.FooterBar.Width(w).Render(
+			st.Label.Render("settings \u00B7 changes saved to config.toml"),
+		)
+	}
+
 	if m.mode == modeAdd {
 		prompt := m.input.View()
 		hint := st.Label.Render("enter: add  \u00B7  esc: cancel")
@@ -47,6 +60,7 @@ func (m *Model) renderFooter(w int) string {
 		st.HelpKey.Render("a") + sp + st.HelpDesc.Render("add"),
 		st.HelpKey.Render("d") + sp + st.HelpDesc.Render("del"),
 		st.HelpKey.Render("s") + sp + st.HelpDesc.Render("sort"),
+		st.HelpKey.Render("c") + sp + st.HelpDesc.Render("config"),
 		st.HelpKey.Render("q") + sp + st.HelpDesc.Render("quit"),
 	}
 
