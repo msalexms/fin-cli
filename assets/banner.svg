@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 280" width="100%">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&amp;display=swap');
+      .title { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 72px; font-weight: 800; fill: #E0E0E0; }
+      .accent { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 72px; font-weight: 800; fill: #4E9A06; }
+      .subtitle { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 18px; font-weight: 400; fill: #808080; letter-spacing: 4px; }
+      .spark { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 14px; fill: #303030; }
+      .spark-up { fill: #4E9A06; }
+      .spark-down { fill: #CC0000; }
+      .line { stroke: #303030; stroke-width: 1; }
+      .glow { filter: url(#green-glow); }
+    </style>
+    <filter id="green-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feFlood flood-color="#4E9A06" flood-opacity="0.3"/>
+      <feComposite in2="blur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="divider" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#303030" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#303030" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#303030" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="280" fill="#000000" rx="12"/>
+
+  <!-- Top decorative sparkline -->
+  <text class="spark" x="40" y="45">▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▂▃▄▅▆▇█▇▆▅▄▃▂▁▁▂▃▄▅▆▇█▇▆▅▄▃▂▁</text>
+
+  <!-- Corner accents -->
+  <path d="M 20 20 L 20 50" stroke="#4E9A06" stroke-width="1" opacity="0.4"/>
+  <path d="M 20 20 L 50 20" stroke="#4E9A06" stroke-width="1" opacity="0.4"/>
+  <path d="M 780 20 L 780 50" stroke="#4E9A06" stroke-width="1" opacity="0.4"/>
+  <path d="M 780 20 L 750 20" stroke="#4E9A06" stroke-width="1" opacity="0.4"/>
+  <path d="M 20 260 L 20 230" stroke="#303030" stroke-width="1"/>
+  <path d="M 20 260 L 50 260" stroke="#303030" stroke-width="1"/>
+  <path d="M 780 260 L 780 230" stroke="#303030" stroke-width="1"/>
+  <path d="M 780 260 L 750 260" stroke="#303030" stroke-width="1"/>
+
+  <!-- Main title: "fin" in grey, "-cli" in green -->
+  <text class="title" x="400" y="130" text-anchor="middle">fin</text>
+  <text class="accent glow" x="560" y="130" text-anchor="middle">-cli</text>
+
+  <!-- Divider line -->
+  <line x1="200" y1="155" x2="600" y2="155" stroke="url(#divider)"/>
+
+  <!-- Subtitle -->
+  <text class="subtitle" x="400" y="185" text-anchor="middle">TERMINAL FINANCIAL MONITOR</text>
+
+  <!-- Decorative elements: arrows and indicators -->
+  <text font-family="'JetBrains Mono', monospace" font-size="16" fill="#4E9A06" x="280" y="220">▲ +2.34%</text>
+  <text font-family="'JetBrains Mono', monospace" font-size="16" fill="#808080" x="390" y="220">│</text>
+  <text font-family="'JetBrains Mono', monospace" font-size="16" fill="#CC0000" x="410" y="220">▼ -1.12%</text>
+  <text font-family="'JetBrains Mono', monospace" font-size="16" fill="#808080" x="520" y="220">│</text>
+  <text font-family="'JetBrains Mono', monospace" font-size="16" fill="#E0E0E0" x="540" y="220">AAPL  $189.84</text>
+
+  <!-- Bottom sparkline -->
+  <text class="spark" x="40" y="255">
+    <tspan fill="#4E9A06">▁▂▃▄▅</tspan>
+    <tspan fill="#808080">▆▇█</tspan>
+    <tspan fill="#CC0000">▇▆▅</tspan>
+    <tspan fill="#808080">▄▃▂▁</tspan>
+    <tspan fill="#4E9A06">▁▂▃▄▅▆▇</tspan>
+    <tspan fill="#808080">█▇▆▅▄▃▂▁</tspan>
+    <tspan fill="#CC0000">▁▂▃▄</tspan>
+    <tspan fill="#808080">▅▆▇█▇▆▅▄▃▂▁</tspan>
+  </text>
+</svg>
