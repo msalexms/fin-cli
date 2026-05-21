@@ -16,6 +16,10 @@
   <a href="#build-from-source">Build</a>
 </p>
 
+<p align="center">
+  <img src="fin-cli-demo.gif" alt="fin-cli demo" width="100%"/>
+</p>
+
 ---
 
 ## Features

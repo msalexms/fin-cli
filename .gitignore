@@ -31,3 +31,7 @@ Thumbs.db
 
 # Local config overrides (if any)
 .env
+
+# VHS demo
+demo.tape
+*.gif
