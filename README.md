@@ -249,4 +249,4 @@ internal/
 
 ## License
 
-MIT
+MIT License. See [LICENSE](LICENSE).
