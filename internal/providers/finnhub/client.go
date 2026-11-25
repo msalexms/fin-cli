@@ -1,312 +1,191 @@
-// Package finnhub implements domain.MarketProvider using the official Finnhub
-// Go SDK (github.com/Finnhub-Stock-API/finnhub-go/v2).
+// Package finnhub implements domain.Provider against the Finnhub REST API
+// (https://finnhub.io/docs/api).
 //
-// The provider gathers four endpoints per quote to assemble a rich snapshot:
-//   - Quote                    : price, day OHLC, change, timestamp
-//   - CompanyProfile2          : name, exchange, industry, currency, marketCap, shares, IPO, web
-//   - CompanyBasicFinancials   : 52-week range, P/E, EPS, beta, dividend yield (best-effort)
-//   - StockCandles             : OHLCV history (premium on free tier; caller handles failure)
-//
-// Missing sub-responses set Partial=true but do not fail the whole call.
-// Network/HTTP errors are classified to domain sentinels.
+// A quote combines three endpoints: /quote (price, mandatory), /stock/profile2
+// (identity, market cap) and /stock/metric (52-week range and fundamentals).
+// The last two are best effort: if they fail the quote is marked Partial.
+// Daily candles are premium-only on Finnhub, so History always reports
+// ErrNoData and the history chain moves on to the next provider.
 package finnhub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
-	finnhubsdk "github.com/Finnhub-Stock-API/finnhub-go/v2"
-
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
-// Client is a domain.MarketProvider backed by the Finnhub SDK.
+const (
+	name    = "finnhub"
+	baseURL = "https://finnhub.io/api/v1"
+)
+
+// Client is a domain.Provider backed by Finnhub.
 type Client struct {
-	api    *finnhubsdk.DefaultApiService
+	http   *httpx.Client
 	apiKey string
+	base   string
 }
 
-// New builds a Finnhub provider. An empty apiKey makes every call fail with
-// domain.ErrNoAPIKey.
-func New(apiKey string) *Client {
-	cfg := finnhubsdk.NewConfiguration()
-	cfg.AddDefaultHeader("X-Finnhub-Token", apiKey)
-	cfg.HTTPClient = &http.Client{Timeout: 15 * time.Second}
-	cfg.UserAgent = "fin-cli"
-	return &Client{
-		api:    finnhubsdk.NewAPIClient(cfg).DefaultApi,
-		apiKey: apiKey,
-	}
+// New builds a Finnhub provider. With an empty apiKey every call fails with
+// domain.ErrNoAPIKey, which the chain treats as "skip".
+func New(h *httpx.Client, apiKey string) *Client {
+	return &Client{http: h, apiKey: apiKey, base: baseURL}
 }
 
-// Name satisfies domain.MarketProvider.
-func (c *Client) Name() string { return "finnhub" }
+// Name implements domain.Provider.
+func (c *Client) Name() string { return name }
 
-// ---------------- Quote ----------------
+type quoteResp struct {
+	C  float64 `json:"c"`
+	D  float64 `json:"d"`
+	DP float64 `json:"dp"`
+	H  float64 `json:"h"`
+	L  float64 `json:"l"`
+	O  float64 `json:"o"`
+	PC float64 `json:"pc"`
+	T  int64   `json:"t"`
+}
 
-// Quote assembles a rich snapshot from multiple Finnhub endpoints.
-// The price call is mandatory; profile and metrics are best-effort.
+type profileResp struct {
+	Country   string  `json:"country"`
+	Currency  string  `json:"currency"`
+	Exchange  string  `json:"exchange"`
+	Industry  string  `json:"finnhubIndustry"`
+	IPO       string  `json:"ipo"`
+	MarketCap float64 `json:"marketCapitalization"`
+	Name      string  `json:"name"`
+}
+
+type metricResp struct {
+	Metric map[string]any `json:"metric"`
+}
+
+// Quote implements domain.Provider.
 func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
 	if c.apiKey == "" {
-		return domain.Quote{}, fmt.Errorf("%w: finnhub", domain.ErrNoAPIKey)
-	}
-	symU := strings.ToUpper(strings.TrimSpace(string(sym)))
-
-	q, resp, err := c.api.Quote(ctx).Symbol(symU).Execute()
-	if err != nil {
-		return domain.Quote{}, classify(resp, err)
+		return domain.Quote{}, fmt.Errorf("%s: %w", name, domain.ErrNoAPIKey)
 	}
 
-	// Finnhub returns all-zero Quote for unknown symbols (no 404).
-	if f32(q.C) == 0 && f32(q.Pc) == 0 && f32(q.O) == 0 {
-		return domain.Quote{}, fmt.Errorf("%w: %s", domain.ErrNotFound, symU)
+	var q quoteResp
+	if err := c.get(ctx, "/quote", url.Values{"symbol": {string(sym)}}, &q); err != nil {
+		return domain.Quote{}, err
+	}
+	// Unknown symbols come back as an all-zero object instead of a 404.
+	if q.C == 0 && q.PC == 0 {
+		return domain.Quote{}, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
 	}
 
 	now := time.Now().UTC()
 	out := domain.Quote{
-		Symbol:    domain.Ticker(symU),
-		Price:     f64(q.C),
-		PrevClose: f64(q.Pc),
-		Change:    f64(q.D),
-		ChangePct: f64(q.Dp),
+		Symbol:    sym,
+		Price:     q.C,
+		PrevClose: q.PC,
+		Change:    q.D,
+		ChangePct: q.DP,
 		AsOf:      now,
 		FetchedAt: now,
-		Source:    domain.SourceFinnhub,
-		Session:   inferSession(now),
+		Source:    name,
 	}
-	if v := f32(q.O); v != 0 {
-		out.Open = domain.Some(f64(q.O))
+	if q.T > 0 {
+		out.AsOf = time.Unix(q.T, 0).UTC()
 	}
-	if v := f32(q.L); v != 0 {
-		out.DayLow = domain.Some(f64(q.L))
-	}
-	if v := f32(q.H); v != 0 {
-		out.DayHigh = domain.Some(f64(q.H))
-	}
+	setPositive(&out.Open, q.O)
+	setPositive(&out.DayLow, q.L)
+	setPositive(&out.DayHigh, q.H)
 
-	// --- Profile (best-effort) ---
-	prof, presp, perr := c.api.CompanyProfile2(ctx).Symbol(symU).Execute()
-	if perr != nil {
-		// Profile unavailable; continue with partial data.
-		_ = presp
+	var prof profileResp
+	if err := c.get(ctx, "/stock/profile2", url.Values{"symbol": {string(sym)}}, &prof); err != nil || prof.Name == "" {
 		out.Partial = true
 	} else {
-		out.Name = strVal(prof.Name)
-		out.Currency = strVal(prof.Currency)
-		out.Exchange = strVal(prof.Exchange)
-		out.Country = strVal(prof.Country)
-		out.Industry = strVal(prof.FinnhubIndustry)
-		out.Weburl = strVal(prof.Weburl)
-		out.IPODate = strVal(prof.Ipo)
-		if prof.MarketCapitalization != nil && *prof.MarketCapitalization != 0 {
-			out.MarketCap = domain.Some(f64(prof.MarketCapitalization))
-		}
-		if prof.ShareOutstanding != nil && *prof.ShareOutstanding != 0 {
-			out.SharesOut = domain.Some(f64(prof.ShareOutstanding))
-		}
+		out.Name = prof.Name
+		out.Currency = prof.Currency
+		out.Exchange = prof.Exchange
+		out.Country = prof.Country
+		out.Industry = prof.Industry
+		out.IPODate = prof.IPO
+		setPositive(&out.MarketCap, prof.MarketCap)
 	}
 
-	// --- Basic financials (best-effort: Finnhub free includes most) ---
-	fin, fresp, ferr := c.api.CompanyBasicFinancials(ctx).Symbol(symU).Metric("all").Execute()
-	if ferr != nil {
-		_ = fresp
+	var met metricResp
+	if err := c.get(ctx, "/stock/metric", url.Values{"symbol": {string(sym)}, "metric": {"all"}}, &met); err != nil || met.Metric == nil {
 		out.Partial = true
-	} else if fin.Metric != nil {
-		m := *fin.Metric
-		if v, ok := metricFloat(m, "52WeekHigh"); ok {
-			out.Week52High = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "52WeekLow"); ok {
-			out.Week52Low = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "peTTM", "peNormalizedAnnual", "peBasicExclExtraTTM"); ok {
-			out.PE = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "epsTTM", "epsAnnual", "epsBasicExclExtraItemsTTM"); ok {
-			out.EPS = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "beta"); ok {
-			out.Beta = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "dividendYieldIndicatedAnnual", "currentDividendYieldTTM"); ok {
-			out.DivYield = domain.Some(v)
-		}
-		if v, ok := metricFloat(m, "10DayAverageTradingVolume"); ok {
-			out.Volume = domain.Some(int64(v * 1_000_000))
+	} else {
+		m := met.Metric
+		setFrom(&out.Week52High, m, "52WeekHigh")
+		setFrom(&out.Week52Low, m, "52WeekLow")
+		setFrom(&out.PE, m, "peTTM", "peBasicExclExtraTTM", "peNormalizedAnnual")
+		setFrom(&out.EPS, m, "epsTTM", "epsBasicExclExtraItemsTTM", "epsAnnual")
+		setFrom(&out.Beta, m, "beta")
+		setFrom(&out.DivYield, m, "currentDividendYieldTTM", "dividendYieldIndicatedAnnual")
+		var avg domain.Optional[float64]
+		setFrom(&avg, m, "10DayAverageTradingVolume") // reported in millions
+		if avg.Valid {
+			out.AvgVolume = domain.Some(int64(avg.Value * 1_000_000))
 		}
 	}
 
+	if out.Country == "US" {
+		out.Session = USSession(now)
+	}
 	return out, nil
 }
 
-// ---------------- History ----------------
+// History implements domain.Provider. Finnhub candles require a paid plan.
+func (c *Client) History(context.Context, domain.Ticker, int) ([]domain.Candle, error) {
+	return nil, fmt.Errorf("%s: %w: candles need a paid plan", name, domain.ErrNoData)
+}
 
-// History fetches daily candles for ~r.Sessions trading days.
-// Note: on Finnhub free tier, /stock/candle returns 403 for most equities.
-// The caller treats the error as best-effort.
-func (c *Client) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("%w: finnhub", domain.ErrNoAPIKey)
-	}
-	if r.Resolution == "" {
-		r.Resolution = domain.ResolutionDaily
-	}
-	sessions := r.Sessions
-	if sessions <= 0 {
-		sessions = 22
-	}
-	// Pad calendar days to cover weekends + holidays.
-	calendarDays := sessions*7/5 + 10
-	to := time.Now().UTC()
-	from := to.AddDate(0, 0, -calendarDays)
-
-	cr, resp, err := c.api.StockCandles(ctx).
-		Symbol(strings.ToUpper(string(sym))).
-		Resolution(string(r.Resolution)).
-		From(from.Unix()).
-		To(to.Unix()).
-		Execute()
+func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
+	h := http.Header{"X-Finnhub-Token": {c.apiKey}}
+	body, err := c.http.GetJSON(ctx, name, c.base+path+"?"+q.Encode(), h, 1<<20)
 	if err != nil {
-		return nil, classify(resp, err)
+		return err
 	}
-	if cr.S == nil || *cr.S != "ok" || cr.C == nil || len(*cr.C) == 0 {
-		return nil, fmt.Errorf("%w: no candles", domain.ErrPartialData)
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("%s: decode %s: %w", name, path, err)
 	}
-
-	closes := *cr.C
-	opens := deref(cr.O)
-	highs := deref(cr.H)
-	lows := deref(cr.L)
-	vols := deref(cr.V)
-	ts := derefInt64(cr.T)
-
-	n := len(closes)
-	out := make([]domain.Candle, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, domain.Candle{
-			Time:   time.Unix(at(ts, i), 0).UTC(),
-			Open:   f64v(at(opens, i)),
-			High:   f64v(at(highs, i)),
-			Low:    f64v(at(lows, i)),
-			Close:  f64v(closes[i]),
-			Volume: int64(f64v(at(vols, i))),
-		})
-	}
-	if len(out) > sessions {
-		out = out[len(out)-sessions:]
-	}
-	return out, nil
+	return nil
 }
 
-// ---------------- helpers ----------------
-
-func f64(p *float32) float64 {
-	if p == nil {
-		return 0
+func setPositive(dst *domain.Optional[float64], v float64) {
+	if v > 0 {
+		*dst = domain.Some(v)
 	}
-	return float64(*p)
-}
-func f32(p *float32) float32 {
-	if p == nil {
-		return 0
-	}
-	return *p
-}
-func strVal(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
 }
 
-func f64v(v float32) float64 { return float64(v) }
-
-func deref[T any](p *[]T) []T {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func derefInt64(p *[]int64) []int64 {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
-func at[T any](s []T, i int) T {
-	var zero T
-	if i < 0 || i >= len(s) {
-		return zero
-	}
-	return s[i]
-}
-
-// metricFloat looks up keys in order and returns the first numeric value.
-// The SDK returns metrics as map[string]interface{}; numbers decode as float64.
-func metricFloat(m map[string]interface{}, keys ...string) (float64, bool) {
+// setFrom stores the first non-zero numeric metric among keys.
+func setFrom(dst *domain.Optional[float64], m map[string]any, keys ...string) {
 	for _, k := range keys {
-		v, ok := m[k]
-		if !ok || v == nil {
-			continue
-		}
-		switch x := v.(type) {
-		case float64:
-			if x != 0 {
-				return x, true
-			}
-		case float32:
-			if x != 0 {
-				return float64(x), true
-			}
-		case int:
-			if x != 0 {
-				return float64(x), true
-			}
-		case int64:
-			if x != 0 {
-				return float64(x), true
-			}
+		if v, ok := m[k].(float64); ok && v != 0 {
+			*dst = domain.Some(v)
+			return
 		}
 	}
-	return 0, false
 }
 
-// inferSession approximates US market session from the quote timestamp.
-// This is a heuristic; Finnhub free tier does not flag sessions.
-func inferSession(t time.Time) domain.MarketSession {
-	if t.IsZero() {
-		return domain.SessionUnknown
-	}
-	// Convert to US Eastern. If the zoneinfo database is missing, fall back to UTC.
+// USSession approximates the US equity session for t (New York time).
+// It ignores exchange holidays.
+func USSession(t time.Time) domain.MarketSession {
 	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
 		return domain.SessionUnknown
 	}
-	local := t.In(loc)
-	wday := local.Weekday()
-	if wday == time.Saturday || wday == time.Sunday {
+	ny := t.In(loc)
+	if wd := ny.Weekday(); wd == time.Saturday || wd == time.Sunday {
 		return domain.SessionClosed
 	}
-	h := local.Hour()
-	m := local.Minute()
-	mins := h*60 + m
-	const (
-		preOpen = 4 * 60        // 04:00
-		regular = 9*60 + 30     // 09:30
-		close_  = 16 * 60       // 16:00
-		postEnd = 20 * 60       // 20:00
-	)
-	switch {
-	case mins >= preOpen && mins < regular:
+	switch mins := ny.Hour()*60 + ny.Minute(); {
+	case mins >= 4*60 && mins < 9*60+30:
 		return domain.SessionPre
-	case mins >= regular && mins < close_:
+	case mins >= 9*60+30 && mins < 16*60:
 		return domain.SessionRegular
-	case mins >= close_ && mins < postEnd:
+	case mins >= 16*60 && mins < 20*60:
 		return domain.SessionPost
 	default:
 		return domain.SessionClosed

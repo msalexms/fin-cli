@@ -1,24 +1,24 @@
-// Package cache is a tiny file-per-key cache on disk with schema versioning.
-//
-// Each entry is stored as a JSON file whose mtime indicates freshness.
-// Callers choose the TTL when reading, so the same cache can serve multiple
-// consumers with different staleness tolerances.
+// Package cache is a small file-per-key JSON cache on disk. Entries record
+// when they were written; callers decide how old is too old.
 package cache
 
 import (
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/fsutil"
 )
 
-// SchemaVersion is bumped when the on-disk entry format changes incompatibly.
-const SchemaVersion = 1
+// schemaVersion is bumped when the entry format changes incompatibly;
+// entries with another version are discarded.
+const schemaVersion = 2
+
+// ErrMiss is returned when a key is absent, corrupt or from another schema.
+var ErrMiss = errors.New("cache miss")
 
 // Entry is the on-disk wrapper.
 type Entry[T any] struct {
@@ -27,116 +27,66 @@ type Entry[T any] struct {
 	Value     T         `json:"value"`
 }
 
-// Store is a file-per-key disk cache rooted at Dir.
+// Store is a file-per-key cache rooted at Dir.
 type Store struct {
 	Dir string
 }
 
-// New returns a Store; it does not create Dir (caller handles EnsureDirs).
+// New returns a Store rooted at dir. The directory is created on first write.
 func New(dir string) *Store { return &Store{Dir: dir} }
 
-// Get reads key. Returns domain.ErrCacheMiss if the file does not exist or
-// the schema version is unknown. It does not enforce TTL; callers inspect
-// FetchedAt and decide.
+// Get reads key. Unreadable entries are removed and reported as ErrMiss.
 func Get[T any](s *Store, key string) (Entry[T], error) {
-	var zero Entry[T]
-	p := s.pathFor(key)
+	var e Entry[T]
+	p := s.path(key)
 	b, err := os.ReadFile(p)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return zero, domain.ErrCacheMiss
-		}
-		return zero, err
+		return e, ErrMiss
 	}
-	var e Entry[T]
-	if err := json.Unmarshal(b, &e); err != nil {
-		// Corrupt entry: treat as miss and remove.
+	if err := json.Unmarshal(b, &e); err != nil || e.Schema != schemaVersion {
 		_ = os.Remove(p)
-		return zero, domain.ErrCacheMiss
-	}
-	if e.Schema != SchemaVersion {
-		_ = os.Remove(p)
-		return zero, domain.ErrCacheMiss
+		return Entry[T]{}, ErrMiss
 	}
 	return e, nil
 }
 
-// Set writes value atomically (tmp + rename) with 0o600 perms.
+// Set writes value atomically.
 func Set[T any](s *Store, key string, value T) error {
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return err
-	}
-	e := Entry[T]{Schema: SchemaVersion, FetchedAt: time.Now().UTC(), Value: value}
-	b, err := json.Marshal(e)
+	b, err := json.Marshal(Entry[T]{Schema: schemaVersion, FetchedAt: time.Now().UTC(), Value: value})
 	if err != nil {
 		return err
 	}
-	final := s.pathFor(key)
-	f, err := os.CreateTemp(s.Dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, final)
+	return fsutil.WriteFileAtomic(s.path(key), b)
 }
 
-// Delete removes a single key; missing keys are not an error.
-func (s *Store) Delete(key string) error {
-	err := os.Remove(s.pathFor(key))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-// Purge removes all entries under Dir (but preserves the directory itself).
+// Purge removes every entry but keeps the directory.
 func (s *Store) Purge() error {
 	entries, err := os.ReadDir(s.Dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
+	var errs []error
 	for _, e := range entries {
-		_ = os.Remove(filepath.Join(s.Dir, e.Name()))
+		if err := os.RemoveAll(filepath.Join(s.Dir, e.Name())); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-// sanitizeKey keeps file names safe across filesystems.
-func sanitizeKey(k string) string {
-	k = strings.ToUpper(k)
+// path maps key to a file name that is safe on every file system.
+func (s *Store) path(key string) string {
 	var b strings.Builder
-	b.Grow(len(k))
-	for _, r := range k {
+	for _, r := range strings.ToUpper(key) {
 		switch {
-		case r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '.', r == '-', r == '_':
+		case r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
 			b.WriteRune(r)
 		default:
 			b.WriteByte('_')
 		}
 	}
-	return b.String()
-}
-
-func (s *Store) pathFor(key string) string {
-	return filepath.Join(s.Dir, sanitizeKey(key)+".json")
+	return filepath.Join(s.Dir, b.String()+".json")
 }

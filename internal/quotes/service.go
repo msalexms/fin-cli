@@ -1,118 +1,110 @@
-// Package quotes orchestrates the cache, throttler, and provider chain to serve
-// quotes to CLI and TUI. It deduplicates concurrent requests via singleflight.
+// Package quotes serves quotes and price history to the CLI and TUI. It
+// combines the provider chains with a disk cache for quotes (with stale
+// fallback when every provider is down), an in-memory cache for history,
+// request de-duplication and a shared rate limit.
 package quotes
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
+	"golang.org/x/time/rate"
 
-	"fin-cli/internal/cache"
-	"fin-cli/internal/domain"
-	"fin-cli/internal/throttle"
+	"github.com/msalexms/fin-cli/internal/cache"
+	"github.com/msalexms/fin-cli/internal/domain"
 )
 
-// DefaultCacheTTL is the default freshness window for cached quotes.
-const DefaultCacheTTL = 5 * time.Minute
+// historyTTL is how long daily candles are reused before refetching.
+const historyTTL = 30 * time.Minute
 
-// Service implements domain.QuoteService.
+// Service is safe for concurrent use. Its providers can be swapped at
+// runtime with Configure (e.g. after the user edits API keys in the TUI).
 type Service struct {
-	// Provider is the legacy single-provider field (kept for backwards compat).
-	// When Chain is set, Provider is ignored for Quote calls.
-	Provider domain.MarketProvider
+	cache   *cache.Store
+	limiter *rate.Limiter
+	sf      singleflight.Group
 
-	// Chain is the ordered list of providers for Quote calls.
-	// If nil, Provider is used as a single-element chain.
-	Chain *ProviderChain
+	mu      sync.RWMutex
+	quote   []domain.Provider
+	history []domain.Provider
+	ttl     time.Duration
 
-	// HistoryProv is the legacy single history provider.
-	// When HistoryChain is set, HistoryProv is ignored.
-	HistoryProv domain.HistoryProvider
-
-	// HistoryChain is the ordered list of providers for History calls.
-	// If nil, HistoryProv or Provider.History is used.
-	HistoryChain *HistoryChain
-
-	// Limiter rate-limits outbound API calls (shared across all providers).
-	// Per-provider limiters are handled at construction in cli/app.go if needed.
-	Limiter *throttle.Limiter
-
-	Cache *cache.Store
-	TTL   time.Duration
-
-	sf singleflight.Group
+	histMu sync.Mutex
+	hist   map[string]histEntry
 }
 
-// New builds a Service. If ttl is zero, DefaultCacheTTL is used.
-// This constructor preserves the legacy single-provider API.
-func New(p domain.MarketProvider, c *cache.Store, l *throttle.Limiter, ttl time.Duration) *Service {
-	if ttl == 0 {
-		ttl = DefaultCacheTTL
-	}
-	return &Service{Provider: p, Cache: c, Limiter: l, TTL: ttl}
+type histEntry struct {
+	at      time.Time
+	candles []domain.Candle
 }
 
-// NewWithChain builds a Service using a ProviderChain and HistoryChain.
-func NewWithChain(chain *ProviderChain, histChain *HistoryChain, c *cache.Store, l *throttle.Limiter, ttl time.Duration) *Service {
-	if ttl == 0 {
-		ttl = DefaultCacheTTL
-	}
+// New returns a Service backed by the given quote cache.
+func New(c *cache.Store) *Service {
 	return &Service{
-		Chain:        chain,
-		HistoryChain: histChain,
-		Cache:        c,
-		Limiter:      l,
-		TTL:          ttl,
+		cache:   c,
+		limiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 10), // 5 calls/s, bursts of 10
+		hist:    make(map[string]histEntry),
+		ttl:     5 * time.Minute,
 	}
 }
 
-// WithHistoryProvider sets a dedicated provider for History calls.
-// Deprecated: use NewWithChain with a HistoryChain instead.
-func (s *Service) WithHistoryProvider(h domain.HistoryProvider) *Service {
-	s.HistoryProv = h
-	return s
+// Configure replaces the provider chains and the quote freshness window, and
+// drops cached history so charts reflect the new providers.
+func (s *Service) Configure(quote, history []domain.Provider, ttl time.Duration) {
+	s.mu.Lock()
+	s.quote, s.history, s.ttl = quote, history, ttl
+	s.mu.Unlock()
+	s.histMu.Lock()
+	clear(s.hist)
+	s.histMu.Unlock()
 }
 
-// Get returns a quote. When force is false, a fresh cached entry is returned
-// without hitting the provider; otherwise the cache is bypassed for reads but
-// still written on success.
-//
-// Graceful degradation: if all providers return transient errors and a cached
-// entry exists (even if stale), the cached value is returned with Source=SourceCache.
+func (s *Service) snapshot() (quote, history []domain.Provider, ttl time.Duration) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.quote, s.history, s.ttl
+}
+
+// Get returns a quote for sym. Unless force is set, a cached quote younger
+// than the polling interval is returned without touching the network. When
+// all providers fail transiently, the last cached quote is returned with
+// Stale=true instead of an error.
 func (s *Service) Get(ctx context.Context, sym domain.Ticker, force bool) (domain.Quote, error) {
-	sym = domain.Ticker(strings.ToUpper(strings.TrimSpace(string(sym))))
-	if sym == "" {
-		return domain.Quote{}, fmt.Errorf("%w: empty ticker", domain.ErrInvalidInput)
+	sym, err := domain.ParseTicker(string(sym))
+	if err != nil {
+		return domain.Quote{}, err
 	}
+	providers, _, ttl := s.snapshot()
 	key := "Q_" + string(sym)
 
 	if !force {
-		if q, ok := s.freshCached(key); ok {
-			return q, nil
+		if e, err := cache.Get[domain.Quote](s.cache, key); err == nil && time.Since(e.FetchedAt) <= ttl {
+			return e.Value, nil
 		}
 	}
 
-	// singleflight dedupes concurrent refreshes of the same key.
 	v, err, _ := s.sf.Do(key, func() (any, error) {
-		if err := s.Limiter.Wait(ctx); err != nil {
+		if err := s.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
-
-		q, err := s.quoteFromChain(ctx, sym)
+		q, err := runChain(ctx, providers, func(p domain.Provider) (domain.Quote, error) {
+			return p.Quote(ctx, sym)
+		})
 		if err != nil {
-			// On transient errors, fall back to stale cache if any.
-			if isTransient(err) {
-				if stale, ok := s.staleCached(key); ok {
+			if domain.IsTransient(err) {
+				if e, cerr := cache.Get[domain.Quote](s.cache, key); cerr == nil {
+					stale := e.Value
+					stale.Stale = true
 					return stale, nil
 				}
 			}
-			return domain.Quote{}, err
+			return nil, err
 		}
-		_ = cache.Set(s.Cache, key, q)
+		q.Symbol = sym
+		_ = cache.Set(s.cache, key, q)
 		return q, nil
 	})
 	if err != nil {
@@ -121,67 +113,42 @@ func (s *Service) Get(ctx context.Context, sym domain.Ticker, force bool) (domai
 	return v.(domain.Quote), nil
 }
 
-// quoteFromChain delegates to the Chain if set, otherwise uses Provider.
-func (s *Service) quoteFromChain(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
-	if s.Chain != nil && s.Chain.Len() > 0 {
-		return s.Chain.Quote(ctx, sym)
-	}
-	if s.Provider != nil {
-		return s.Provider.Quote(ctx, sym)
-	}
-	return domain.Quote{}, fmt.Errorf("%w: no providers configured", domain.ErrNoAPIKey)
-}
-
-// History returns candles. Uses HistoryChain if set, then HistoryProv, then Provider.
-func (s *Service) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
-	if err := s.Limiter.Wait(ctx); err != nil {
+// History returns up to sessions daily candles, oldest first. Results are
+// reused for historyTTL unless force is set.
+func (s *Service) History(ctx context.Context, sym domain.Ticker, sessions int, force bool) ([]domain.Candle, error) {
+	sym, err := domain.ParseTicker(string(sym))
+	if err != nil {
 		return nil, err
 	}
+	_, providers, _ := s.snapshot()
+	key := fmt.Sprintf("H_%s_%d", sym, sessions)
 
-	if s.HistoryChain != nil {
-		return s.HistoryChain.History(ctx, sym, r)
+	if !force {
+		s.histMu.Lock()
+		e, ok := s.hist[key]
+		s.histMu.Unlock()
+		if ok && time.Since(e.at) <= historyTTL {
+			return e.candles, nil
+		}
 	}
-	if s.HistoryProv != nil {
-		return s.HistoryProv.History(ctx, sym, r)
-	}
-	if s.Chain != nil && s.Chain.Len() > 0 {
-		return s.Chain.History(ctx, sym, r)
-	}
-	if s.Provider != nil {
-		return s.Provider.History(ctx, sym, r)
-	}
-	return nil, fmt.Errorf("%w: no history providers configured", domain.ErrNoAPIKey)
-}
 
-// freshCached returns a cached quote whose FetchedAt is within TTL.
-func (s *Service) freshCached(key string) (domain.Quote, bool) {
-	e, err := cache.Get[domain.Quote](s.Cache, key)
+	v, err, _ := s.sf.Do(key, func() (any, error) {
+		if err := s.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		candles, err := runChain(ctx, providers, func(p domain.Provider) ([]domain.Candle, error) {
+			return p.History(ctx, sym, sessions)
+		})
+		if err != nil {
+			return nil, err
+		}
+		s.histMu.Lock()
+		s.hist[key] = histEntry{at: time.Now(), candles: candles}
+		s.histMu.Unlock()
+		return candles, nil
+	})
 	if err != nil {
-		return domain.Quote{}, false
+		return nil, err
 	}
-	if time.Since(e.FetchedAt) > s.TTL {
-		return domain.Quote{}, false
-	}
-	q := e.Value
-	q.Source = domain.SourceCache
-	q.FetchedAt = e.FetchedAt
-	return q, true
-}
-
-// staleCached returns the last cached quote regardless of TTL, marked as cache source.
-func (s *Service) staleCached(key string) (domain.Quote, bool) {
-	e, err := cache.Get[domain.Quote](s.Cache, key)
-	if err != nil {
-		return domain.Quote{}, false
-	}
-	q := e.Value
-	q.Source = domain.SourceCache
-	q.FetchedAt = e.FetchedAt
-	return q, true
-}
-
-func isTransient(err error) bool {
-	return errors.Is(err, domain.ErrNetwork) ||
-		errors.Is(err, domain.ErrUnavailable) ||
-		errors.Is(err, domain.ErrRateLimited)
+	return v.([]domain.Candle), nil
 }

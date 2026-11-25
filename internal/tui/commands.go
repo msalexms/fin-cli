@@ -2,88 +2,129 @@ package tui
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/domain"
 )
 
-// fetchQuoteCmd returns a tea.Cmd that fetches a quote and (best-effort) history.
-func fetchQuoteCmd(ctx context.Context, svc QuotesFetcher, t domain.Ticker, force bool) tea.Cmd {
-	return func() tea.Msg {
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
+const (
+	fetchTimeout = 20 * time.Second
+	toastTTL     = 4 * time.Second
+)
 
-		q, err := svc.Get(cctx, t, force)
-		if err != nil {
-			return quoteFetchedMsg{Ticker: t, Err: err, Force: force}
-		}
-		candles, herr := svc.History(cctx, t, domain.DefaultRange)
-		if herr != nil {
-			return quoteFetchedMsg{Ticker: t, Quote: q, Candles: nil, Force: force}
-		}
-		return quoteFetchedMsg{Ticker: t, Quote: q, Candles: candles, Force: force}
-	}
+type fetchedMsg struct {
+	ticker  domain.Ticker
+	quote   domain.Quote
+	err     error
+	candles []domain.Candle // nil when history failed: keep the previous chart
 }
 
-// fetchSparklineCmd fetches 5-day history for a ticker's sidebar sparkline.
-func fetchSparklineCmd(ctx context.Context, svc QuotesFetcher, t domain.Ticker) tea.Cmd {
-	return func() tea.Msg {
-		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
+type pollMsg struct{ gen int }
 
-		candles, err := svc.History(cctx, t, domain.Range5D)
-		if err != nil {
-			return sparklineMsg{Ticker: t, Err: err}
-		}
-		data := make([]float64, 0, len(candles))
-		for _, c := range candles {
-			data = append(data, c.Close)
-		}
-		return sparklineMsg{Ticker: t, Data: data}
-	}
+type addedMsg struct {
+	input  string
+	ticker domain.Ticker
+	quote  domain.Quote
+	err    error
 }
 
-// pollTickCmd emits a pollTickMsg after d.
-func pollTickCmd(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(time.Time) tea.Msg {
-		return pollTickMsg{}
+type removedMsg struct {
+	ticker domain.Ticker
+	err    error
+}
+
+type movedMsg struct{ err error }
+
+type toastExpiredMsg struct{ id int }
+
+// fetch loads the quote and, best effort, the chart history of t.
+func (m *Model) fetch(t domain.Ticker, force bool) tea.Cmd {
+	e := m.entry(t)
+	if e.loading {
+		return nil
+	}
+	e.loading = true
+	ctx, be := m.ctx, m.be
+	return tea.Batch(m.startSpinner(), func() tea.Msg {
+		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+		defer cancel()
+		q, err := be.Quote(ctx, t, force)
+		if err != nil {
+			return fetchedMsg{ticker: t, err: err}
+		}
+		candles, _ := be.History(ctx, t, domain.HistorySessions, force)
+		return fetchedMsg{ticker: t, quote: q, candles: candles}
 	})
 }
 
-// addTickerCmd resolves (if ISIN), validates against the provider, and persists.
-func addTickerCmd(ctx context.Context, deps Deps, raw string) tea.Cmd {
+func (m *Model) refreshAll(force bool) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(m.tickers))
+	for _, t := range m.tickers {
+		cmds = append(cmds, m.fetch(t, force))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) schedulePoll() tea.Cmd {
+	m.pollGen++
+	gen := m.pollGen
+	return tea.Tick(m.pollInterval(), func(time.Time) tea.Msg { return pollMsg{gen: gen} })
+}
+
+func (m *Model) addTicker(raw string) tea.Cmd {
+	ctx, be := m.ctx, m.be
 	return func() tea.Msg {
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 		defer cancel()
-
-		raw = strings.ToUpper(strings.TrimSpace(raw))
-		if raw == "" {
-			return addResultMsg{Err: fmt.Errorf("%w: empty ticker", domain.ErrInvalidInput)}
-		}
-
-		t, err := deps.Resolver.ResolveInput(cctx, raw, false)
+		t, err := be.Resolve(ctx, raw)
 		if err != nil {
-			return addResultMsg{Err: err}
+			return addedMsg{input: raw, err: err}
 		}
-		q, err := deps.Quotes.Get(cctx, t, true)
-		if err != nil {
-			return addResultMsg{Ticker: t, Err: err}
+		q, err := be.Quote(ctx, t, false)
+		if err == nil {
+			err = be.AddTicker(t)
 		}
-		if err := deps.Watchlist.Add(t); err != nil {
-			return addResultMsg{Ticker: t, Err: err}
-		}
-		return addResultMsg{Ticker: t, Quote: q}
+		return addedMsg{input: raw, ticker: t, quote: q, err: err}
 	}
 }
 
-// deleteTickerCmd removes t from the watchlist.
-func deleteTickerCmd(deps Deps, t domain.Ticker) tea.Cmd {
-	return func() tea.Msg {
-		err := deps.Watchlist.Remove(t)
-		return deleteResultMsg{Ticker: t, Err: err}
+func (m *Model) removeTicker(t domain.Ticker) tea.Cmd {
+	be := m.be
+	return func() tea.Msg { return removedMsg{ticker: t, err: be.RemoveTicker(t)} }
+}
+
+func (m *Model) moveTicker(t domain.Ticker, delta int) tea.Cmd {
+	be := m.be
+	return func() tea.Msg { return movedMsg{err: be.MoveTicker(t, delta)} }
+}
+
+// notify shows a transient message in the footer.
+func (m *Model) notify(kind toastKind, text string) tea.Cmd {
+	id := m.toast.id + 1
+	m.toast = toast{text: text, kind: kind, id: id}
+	return tea.Tick(toastTTL, func(time.Time) tea.Msg { return toastExpiredMsg{id: id} })
+}
+
+// startSpinner starts the spinner animation if it is not already running.
+// It stops by itself once nothing is loading, so an idle dashboard does not
+// redraw at all.
+func (m *Model) startSpinner() tea.Cmd {
+	if m.spinOn {
+		return nil
 	}
+	m.spinOn = true
+	return m.spin.Tick
+}
+
+func (m *Model) onSpinner(msg spinner.TickMsg) tea.Cmd {
+	if !m.anyLoading() {
+		m.spinOn = false
+		return nil
+	}
+	var cmd tea.Cmd
+	m.spin, cmd = m.spin.Update(msg)
+	return cmd
 }

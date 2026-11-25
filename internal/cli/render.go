@@ -1,225 +1,138 @@
-// Package cli implements the Cobra subcommands and the neofetch-like
-// renderer used by `fin-cli quote`.
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
-	"time"
 
-	"fin-cli/internal/chart"
-	"fin-cli/internal/domain"
-	"fin-cli/internal/format"
-	"fin-cli/internal/locale"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
+
+	"github.com/msalexms/fin-cli/internal/chart"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/format"
+	"github.com/msalexms/fin-cli/internal/locale"
+	"github.com/msalexms/fin-cli/internal/theme"
 )
 
-// Exit code convention (used by `fin-cli quote` and friends):
-//
-//	0 OK
-//	1 generic error
-//	2 usage / invalid input
-//	3 network / provider unavailable
-//	4 config / auth
-//	5 ticker not found
-const (
-	ExitOK       = 0
-	ExitGeneric  = 1
-	ExitUsage    = 2
-	ExitNetwork  = 3
-	ExitConfig   = 4
-	ExitNotFound = 5
-)
-
-// ExitCodeFor returns the exit code appropriate for err.
-func ExitCodeFor(err error) int {
-	switch {
-	case err == nil:
-		return ExitOK
-	case errors.Is(err, domain.ErrNotFound):
-		return ExitNotFound
-	case errors.Is(err, domain.ErrInvalidInput):
-		return ExitUsage
-	case errors.Is(err, domain.ErrUnauthorized),
-		errors.Is(err, domain.ErrNoAPIKey):
-		return ExitConfig
-	case errors.Is(err, domain.ErrNetwork),
-		errors.Is(err, domain.ErrUnavailable),
-		errors.Is(err, domain.ErrRateLimited):
-		return ExitNetwork
-	default:
-		return ExitGeneric
-	}
-}
-
-// ANSI (truecolor) codes. We avoid lipgloss in the one-shot renderer so the
-// output is predictable and NO_COLOR is honored cleanly.
-const (
-	ansiReset  = "\x1b[0m"
-	ansiBold   = "\x1b[1m"
-	ansiGreen  = "\x1b[38;2;78;154;6m"    // #4E9A06
-	ansiRed    = "\x1b[38;2;204;0;0m"     // #CC0000
-	ansiLabel  = "\x1b[38;2;128;128;128m" // #808080
-	ansiSubtle = "\x1b[38;2;48;48;48m"    // #303030
-)
-
-// RenderOptions controls how RenderQuote formats the output.
+// RenderOptions controls RenderQuote.
 type RenderOptions struct {
-	NoColor     bool
-	ASCIIOnly   bool
-	Width       int
-	ChartHeight int
-	Printer     locale.Printer
+	Printer locale.Printer
+	Width   int // total columns; 0 means 80
 }
 
-// RenderQuote writes a neofetch-like snapshot of q, optionally followed by a
-// chart drawn from candles.
-//
-// Provenance badge:
-//
-//	[*] fresh from provider, full data
-//	[!] fresh but partial (some fields missing)
-//	[~] served from cache (stale)
+// RenderQuote writes a snapshot of q followed by a chart of candles. Colors
+// are only emitted when w is a color-capable terminal and NO_COLOR is unset.
 func RenderQuote(w io.Writer, q domain.Quote, candles []domain.Candle, opt RenderOptions) {
-	if opt.Width <= 0 {
-		opt.Width = 80
+	width := opt.Width
+	if width <= 0 {
+		width = 80
 	}
-	if opt.ChartHeight <= 0 {
-		opt.ChartHeight = 12
-	}
+	r := lipgloss.NewRenderer(w)
+	st := theme.New(r)
 	p := opt.Printer
+	ascii := p.ASCIIOnly()
+	rule := st.Line.Render(strings.Repeat(lineChar(ascii), width))
 
-	// --- title line ---
-	badge, provider := format.SourceBadge(q)
-	badgeColored := opt.colorize(badgeColor(q), badge)
-	title := opt.colorize(ansiBold, "▌ "+string(q.Symbol))
-	name := ""
+	// Title: symbol + name on the left, provenance on the right.
+	left := st.Accent.Render(mark(ascii)+" ") + st.Strong.Render(string(q.Symbol))
 	if q.Name != "" {
-		name = "  " + opt.colorize(ansiLabel, q.Name)
+		left += "  " + st.Text2.Render(q.Name)
 	}
-	right := badgeColored + " " + opt.colorize(ansiLabel, provider)
-	fmt.Fprintln(w, pad(title+name, right, opt.Width))
-	fmt.Fprintln(w, opt.colorize(ansiSubtle, format.Repeat("─", opt.Width)))
+	prov := st.Muted
+	if q.Stale {
+		prov = st.Warn
+	}
+	fmt.Fprintln(w, spread(left, prov.Render(format.Provenance(q)), width))
+	fmt.Fprintln(w, rule)
 
-	// --- price line ---
-	priceStr := opt.colorize(ansiBold, p.Sprintf("%.2f", q.Price))
-	cur := q.Currency
-	arrow := format.ChangeArrow(q.Change, opt.ASCIIOnly)
-	body := format.ChangeBody(p, q.Change, q.ChangePct)
-	color := ansiLabel
-	if q.Change > 0 {
-		color = ansiGreen
-	} else if q.Change < 0 {
-		color = ansiRed
+	// Price line.
+	change := st.Change(q.Change).Render(format.ChangeArrow(q.Change, ascii) + " " + format.Change(p, q.Price, q.Change, q.ChangePct))
+	line := "  " + st.Strong.Render(format.Price(p, q.Price))
+	if q.Currency != "" {
+		line += " " + st.Muted.Render(q.Currency)
 	}
-	change := opt.colorize(color, arrow+" "+body)
-	sessTag := ""
+	line += "   " + change
 	if s := format.SessionLabel(q.Session); s != "" {
-		sessTag = "   " + opt.colorize(ansiLabel, "· "+s)
+		line += "   " + st.Muted.Render("· "+s)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  %s %s    %s%s\n", priceStr, opt.colorize(ansiLabel, cur), change, sessTag)
-	fmt.Fprintln(w)
+	fmt.Fprintf(w, "\n%s\n\n", line)
 
-	// --- stats grid ---
-	renderGrid(w, format.StatsRows(q, p), opt)
-
-	// --- meta line ---
-	if meta := format.MetaLine(q); meta != "" {
-		fmt.Fprintln(w, opt.colorize(ansiSubtle, format.Repeat("─", opt.Width)))
-		fmt.Fprintf(w, "  %s\n", opt.colorize(ansiLabel, meta))
-	}
-
-	// --- chart ---
-	if len(candles) > 0 {
-		series := make(chart.Series, 0, len(candles))
-		for _, c := range candles {
-			series = append(series, c.Close)
-		}
-		r := chart.ASCII{Caption: fmt.Sprintf("%d-session close", len(series))}
-		plot := r.Render(series, opt.Width-4, opt.ChartHeight)
-		cc := ""
-		switch series.Trend() {
-		case 1:
-			cc = ansiGreen
-		case -1:
-			cc = ansiRed
-		}
-		if cc != "" && !opt.NoColor {
-			plot = colorizeLines(plot, cc)
-		}
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, plot)
-	}
-
-	// --- timestamp footer ---
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, opt.colorize(ansiLabel, "  fetched "+q.FetchedAt.Local().Format(time.RFC3339)))
-}
-
-// --- helpers ---
-
-func badgeColor(q domain.Quote) string {
-	switch q.Source {
-	case domain.SourceCache:
-		return ansiLabel
-	default:
-		if q.Partial {
-			return ansiRed
-		}
-		return ansiGreen
-	}
-}
-
-func renderGrid(w io.Writer, rows [][2]string, opt RenderOptions) {
-	inner := opt.Width - 4
-	colW := inner / 2
-	if colW < 16 {
-		colW = 16
-	}
+	// Stats grid, two columns.
+	rows := format.StatsRows(q, p)
+	colW := max((width-4)/2, 24)
 	for i := 0; i < len(rows); i += 2 {
-		left := gridCell(rows[i][0], rows[i][1], colW, opt)
-		var right string
-		if i+1 < len(rows) {
-			right = gridCell(rows[i+1][0], rows[i+1][1], colW, opt)
+		cell := func(r [2]string) string {
+			return st.Muted.Render(padTo(r[0], 12)) + st.Text.Render(padTo(r[1], colW-12))
 		}
-		fmt.Fprintf(w, "  %s  %s\n", left, right)
+		row := "  " + cell(rows[i])
+		if i+1 < len(rows) {
+			row += cell(rows[i+1])
+		}
+		fmt.Fprintln(w, strings.TrimRight(row, " "))
 	}
+
+	if meta := format.MetaLine(q); meta != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  "+st.Muted.Render(meta))
+	}
+
+	if len(candles) > 1 {
+		series := make(chart.Series, len(candles))
+		for i, c := range candles {
+			series[i] = c.Close
+		}
+		plot := chart.Line(series, width-2, 10, "")
+		style := st.Change(float64(series.Trend()))
+		fmt.Fprintln(w)
+		for _, l := range strings.Split(plot, "\n") {
+			fmt.Fprintln(w, "  "+style.Render(l))
+		}
+		span := candles[0].Time.Format("Jan 2") + " – " + candles[len(candles)-1].Time.Format("Jan 2")
+		fmt.Fprintln(w, "  "+st.Muted.Render(fmt.Sprintf("%d sessions · %s", len(candles), span)))
+	}
+
+	fmt.Fprintln(w)
+	foot := "as of " + q.AsOf.Local().Format("2006-01-02 15:04")
+	if q.Stale {
+		foot += " · providers unreachable, showing the last cached quote"
+	}
+	fmt.Fprintln(w, "  "+st.Muted.Render(foot))
 }
 
-func gridCell(label, value string, w int, opt RenderOptions) string {
-	labelW := 11
-	valW := w - labelW
-	if valW < 1 {
-		valW = 1
+// termWidth returns the terminal width for w, capped to keep output readable.
+func termWidth(w io.Writer) int {
+	if f, ok := w.(*os.File); ok {
+		if cols, _, err := term.GetSize(f.Fd()); err == nil && cols > 0 {
+			return min(cols, 100)
+		}
 	}
-	return opt.colorize(ansiLabel, format.PadRightANSI(label, labelW)) + " " + format.PadRightANSI(value, valW-1)
+	return 80
 }
 
-// --- color ---
-
-func pad(left, right string, width int) string {
-	lw := format.VisibleLen(left)
-	rw := format.VisibleLen(right)
-	g := width - lw - rw
-	if g < 1 {
-		g = 1
-	}
-	return left + format.Repeat(" ", g) + right
+func spread(left, right string, width int) string {
+	gap := max(width-lipgloss.Width(left)-lipgloss.Width(right), 2)
+	return left + strings.Repeat(" ", gap) + right
 }
 
-func (opt RenderOptions) colorize(code, s string) string {
-	if opt.NoColor {
-		return s
+func padTo(s string, n int) string {
+	if w := lipgloss.Width(s); w < n {
+		return s + strings.Repeat(" ", n-w)
 	}
-	return code + s + ansiReset
+	return s + " "
 }
 
-func colorizeLines(s, code string) string {
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = code + l + ansiReset
+func mark(ascii bool) string {
+	if ascii {
+		return ">"
 	}
-	return strings.Join(lines, "\n")
+	return "▌"
+}
+
+func lineChar(ascii bool) string {
+	if ascii {
+		return "-"
+	}
+	return "─"
 }

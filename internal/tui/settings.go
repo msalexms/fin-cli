@@ -2,232 +2,156 @@ package tui
 
 import (
 	"strings"
-	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
-	"fin-cli/internal/config"
+	"github.com/msalexms/fin-cli/internal/config"
+	"github.com/msalexms/fin-cli/internal/theme"
 )
 
-// settingsField describes one editable row in the settings panel.
-type settingsField struct {
-	Label       string
-	Key         string // config path for display
-	Value       func(config.Config) string
-	Apply       func(*config.Config, string)
-	Placeholder string
-	Secret      bool // mask display value
+// settingsState drives the settings panel, built from config.Fields so the
+// panel and `fin-cli config set` always accept the same keys and values.
+type settingsState struct {
+	cursor  int
+	editing bool
+	input   textinput.Model
+	err     string
 }
 
-func settingsFields() []settingsField {
-	return []settingsField{
-		{
-			Label:       "Finnhub API Key",
-			Key:         "finnhub.api_key",
-			Value:       func(c config.Config) string { return c.Finnhub.APIKey },
-			Apply:       func(c *config.Config, v string) { c.Finnhub.APIKey = v },
-			Placeholder: "paste key here",
-			Secret:      true,
-		},
-		{
-			Label:       "Twelve Data API Key",
-			Key:         "twelvedata.api_key",
-			Value:       func(c config.Config) string { return c.TwelveData.APIKey },
-			Apply:       func(c *config.Config, v string) { c.TwelveData.APIKey = v },
-			Placeholder: "paste key here",
-			Secret:      true,
-		},
-		{
-			Label:       "Alpha Vantage API Key",
-			Key:         "alphavantage.api_key",
-			Value:       func(c config.Config) string { return c.AlphaVantage.APIKey },
-			Apply:       func(c *config.Config, v string) { c.AlphaVantage.APIKey = v },
-			Placeholder: "paste key here",
-			Secret:      true,
-		},
-		{
-			Label:       "OpenFIGI API Key",
-			Key:         "openfigi.api_key",
-			Value:       func(c config.Config) string { return c.OpenFIGI.APIKey },
-			Apply:       func(c *config.Config, v string) { c.OpenFIGI.APIKey = v },
-			Placeholder: "optional",
-			Secret:      true,
-		},
-		{
-			Label:       "Polling Interval",
-			Key:         "polling_interval",
-			Value:       func(c config.Config) string { return c.PollingInterval.Std().String() },
-			Apply:       func(c *config.Config, v string) {
-				if d, err := time.ParseDuration(v); err == nil {
-					c.PollingInterval = config.Duration(d)
-				}
-			},
-			Placeholder: "e.g. 5m, 2m30s",
-		},
-		{
-			Label: "Quote Providers",
-			Key:   "providers",
-			Value: func(c config.Config) string { return strings.Join(c.Providers, ", ") },
-			Apply: func(c *config.Config, v string) {
-				parts := strings.Split(v, ",")
-				var clean []string
-				for _, p := range parts {
-					p = strings.TrimSpace(p)
-					if p != "" {
-						clean = append(clean, p)
-					}
-				}
-				if len(clean) > 0 {
-					c.Providers = clean
-				}
-			},
-			Placeholder: "finnhub, yahoo, twelvedata, alphavantage",
-		},
-		{
-			Label: "History Providers",
-			Key:   "history_providers",
-			Value: func(c config.Config) string { return strings.Join(c.HistoryProviders, ", ") },
-			Apply: func(c *config.Config, v string) {
-				parts := strings.Split(v, ",")
-				var clean []string
-				for _, p := range parts {
-					p = strings.TrimSpace(p)
-					if p != "" {
-						clean = append(clean, p)
-					}
-				}
-				if len(clean) > 0 {
-					c.HistoryProviders = clean
-				}
-			},
-			Placeholder: "yahoo, twelvedata, alphavantage",
-		},
-	}
+func newSettings(st theme.Styles) settingsState {
+	in := textinput.New()
+	in.Prompt = "› "
+	in.CharLimit = 128
+	in.PromptStyle = st.Accent
+	in.TextStyle = st.Text
+	in.PlaceholderStyle = st.Muted
+	in.Cursor.Style = st.Brand
+	return settingsState{input: in}
 }
 
-// renderSettings renders the full-screen settings panel.
-func (m *Model) renderSettings(w, h int) string {
-	st := m.styles
-	inner := w - 4
-	if inner < 20 {
-		inner = 20
-	}
-
-	title := st.Title.Width(inner).Render("\u258C SETTINGS")
-	sep := st.Subtle.Width(inner).Render(strings.Repeat("\u2500", inner))
-	hint := st.Label.Width(inner).Render("  \u2191/\u2193 navigate  \u00B7  enter edit  \u00B7  esc back")
-
-	fields := settingsFields()
-	cfg := m.deps.Config.GetConfig()
-
-	var rows []string
-	for i, f := range fields {
-		val := f.Value(cfg)
-		display := val
-		if f.Secret && val != "" {
-			display = maskSecret(val)
-		}
-		if display == "" {
-			display = st.Subtle.Render("(not set)")
-		} else {
-			display = st.Base.Render(display)
-		}
-
-		label := st.Label.Render(padRight(f.Label, 22))
-		cursor := "  "
-		if i == m.settingsCursor {
-			cursor = st.Accent.Render("\u258C ")
-			label = st.Title.Render(padRight(f.Label, 22))
-		}
-
-		row := cursor + label + st.Base.Render(" ") + display
-
-		// If editing this field, show the input instead.
-		if m.settingsEditing && i == m.settingsCursor {
-			row = cursor + label + st.Base.Render(" ") + m.settingsInput.View()
-		}
-
-		rows = append(rows, row)
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left,
-		title,
-		sep,
-		"",
-		strings.Join(rows, "\n"),
-		"",
-		sep,
-		hint,
-	)
-	return st.PaneBorder.Width(w - 2).Height(h - 2).Render(content)
+func (s *settingsState) open() {
+	s.editing = false
+	s.err = ""
+	s.input.Blur()
 }
 
-// onSettingsKey handles key events in settings mode.
-func (m *Model) onSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	fields := settingsFields()
+func (m *Model) onSettingsKey(msg tea.KeyMsg) tea.Cmd {
+	s := &m.set
+	f := config.Fields[s.cursor]
 
-	if m.settingsEditing {
+	if s.editing {
 		switch {
-		case keyMatches(m.keys.Cancel, msg):
-			m.settingsEditing = false
-			m.settingsInput.Blur()
-			return m, nil
-		case keyMatches(m.keys.Submit, msg):
-			// Apply the value.
-			cfg := m.deps.Config.GetConfig()
-			fields[m.settingsCursor].Apply(&cfg, m.settingsInput.Value())
-			if err := m.deps.Config.SetConfig(cfg); err != nil {
-				m.setStatus(false, "save failed: "+err.Error())
-			} else {
-				m.setStatus(true, "saved "+fields[m.settingsCursor].Key)
-			}
-			m.settingsEditing = false
-			m.settingsInput.Blur()
-			return m, nil
+		case is(msg, keys.Cancel):
+			s.open()
+			return nil
+		case is(msg, keys.Confirm):
+			return m.saveField(f, s.input.Value())
 		}
 		var cmd tea.Cmd
-		m.settingsInput, cmd = m.settingsInput.Update(msg)
-		return m, cmd
+		s.input, cmd = s.input.Update(msg)
+		s.err = ""
+		return cmd
 	}
 
 	switch {
-	case keyMatches(m.keys.Cancel, msg), keyMatches(m.keys.Settings, msg):
+	case is(msg, keys.Cancel), is(msg, keys.Settings), is(msg, keys.Quit):
 		m.mode = modeList
-		return m, nil
-	case keyMatches(m.keys.Quit, msg):
-		m.mode = modeList
-		return m, nil
-	case keyMatches(m.keys.Up, msg):
-		m.settingsCursor--
-		if m.settingsCursor < 0 {
-			m.settingsCursor = len(fields) - 1
+	case is(msg, keys.Up):
+		s.cursor = (s.cursor - 1 + len(config.Fields)) % len(config.Fields)
+	case is(msg, keys.Down):
+		s.cursor = (s.cursor + 1) % len(config.Fields)
+	case is(msg, keys.Confirm):
+		s.editing = true
+		s.err = ""
+		s.input.Placeholder = f.Hint
+		s.input.SetValue(f.Get(m.be.Config()))
+		s.input.EchoMode = textinput.EchoNormal
+		if f.Secret {
+			s.input.EchoMode = textinput.EchoPassword
+			s.input.EchoCharacter = '•'
 		}
-		return m, nil
-	case keyMatches(m.keys.Down, msg):
-		m.settingsCursor++
-		if m.settingsCursor >= len(fields) {
-			m.settingsCursor = 0
-		}
-		return m, nil
-	case keyMatches(m.keys.Submit, msg):
-		// Enter edit mode for the selected field.
-		cfg := m.deps.Config.GetConfig()
-		f := fields[m.settingsCursor]
-		m.settingsEditing = true
-		m.settingsInput.Placeholder = f.Placeholder
-		m.settingsInput.SetValue(f.Value(cfg))
-		m.settingsInput.Focus()
-		m.settingsInput.CursorEnd()
-		return m, nil
+		s.input.CursorEnd()
+		return s.input.Focus()
 	}
-	return m, nil
+	return nil
 }
 
-// maskSecret shows only the last 4 chars of a secret.
-func maskSecret(s string) string {
-	if len(s) <= 4 {
-		return "****"
+// saveField validates and persists a value, then applies its side effects
+// right away: new keys/providers refetch everything, a new interval
+// reschedules polling.
+func (m *Model) saveField(f config.Field, value string) tea.Cmd {
+	cfg := m.be.Config()
+	before := f.Get(cfg)
+	if err := f.Set(&cfg, value); err != nil {
+		m.set.err = err.Error()
+		return nil
 	}
-	return "****" + s[len(s)-4:]
+	m.set.open()
+	if f.Get(cfg) == before {
+		return nil
+	}
+	if err := m.be.UpdateConfig(cfg); err != nil {
+		return m.notify(toastErr, "Could not save: "+err.Error())
+	}
+	cmds := []tea.Cmd{m.notify(toastOK, f.Label+" saved")}
+	switch {
+	case f.Key == "polling_interval":
+		cmds = append(cmds, m.schedulePoll())
+	case f.Key == "ui.sort_mode":
+	default: // API keys and provider chains
+		cmds = append(cmds, m.refreshAll(true))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) viewSettings(w, h int) string {
+	st, s := m.st, &m.set
+	cfg := m.be.Config()
+	labelW := 24
+	valueW := max(w-labelW-6, 10)
+
+	lines := []string{st.Label.Render("SETTINGS"), ""}
+	for i, f := range config.Fields {
+		active := i == s.cursor
+		cursor := "  "
+		label := st.Text2.Render(pad(f.Label, labelW))
+		if active {
+			cursor = st.Accent.Render(m.glyph("▸", ">")) + " "
+			label = st.Accent.Render(pad(f.Label, labelW))
+		}
+		var value string
+		switch {
+		case active && s.editing:
+			s.input.Width = valueW - 3
+			value = s.input.View()
+		default:
+			v := f.Get(cfg)
+			if f.Secret {
+				v = config.Mask(v)
+			}
+			if v == "" {
+				value = st.Muted.Render("not set")
+			} else {
+				value = st.Text.Render(truncate(v, valueW))
+			}
+			if src := m.be.Override(f); src != "" {
+				value += st.Warn.Render("  ← " + src)
+			}
+		}
+		lines = append(lines, cursor+label+value)
+	}
+
+	f := config.Fields[s.cursor]
+	lines = append(lines, "", st.Line.Render(strings.Repeat(m.glyph("─", "-"), w)))
+	if s.err != "" {
+		lines = append(lines, st.Down.Render(m.glyph("✗ ", "x ")+s.err))
+	} else {
+		lines = append(lines, st.Muted.Render(f.Hint))
+	}
+	if src := m.be.Override(f); src != "" {
+		lines = append(lines, st.Warn.Render("Currently overridden by "+src+"; the saved value applies when it is unset."))
+	}
+	lines = append(lines, "", st.Muted.Render("Changes apply immediately and are saved to"), st.Muted.Render(m.be.ConfigPath()))
+	return fit(strings.Join(lines, "\n"), w, h)
 }

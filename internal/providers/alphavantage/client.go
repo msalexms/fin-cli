@@ -1,305 +1,186 @@
-// Package alphavantage implements domain.MarketProvider against the Alpha Vantage
-// REST API (https://www.alphavantage.co/documentation/).
-//
-// Free tier: 25 requests/day, 5 requests/minute.
-// This provider is intended as a last-resort fallback due to the harsh daily limit.
-// Requires a free API key from https://www.alphavantage.co/support/#api-key.
+// Package alphavantage implements domain.Provider against the Alpha Vantage
+// REST API (https://www.alphavantage.co/documentation/). The free tier allows
+// 25 requests per day, so it is meant as a last-resort fallback.
 package alphavantage
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
-const baseURL = "https://www.alphavantage.co/query"
+const (
+	name    = "alphavantage"
+	baseURL = "https://www.alphavantage.co/query"
+)
 
-// Client implements domain.MarketProvider.
+// Client implements domain.Provider.
 type Client struct {
 	http   *httpx.Client
 	apiKey string
 	base   string
 }
 
-// New returns a Client. If apiKey is empty, all calls return ErrNoAPIKey.
+// New returns a Client. With an empty apiKey every call fails with ErrNoAPIKey.
 func New(h *httpx.Client, apiKey string) *Client {
 	return &Client{http: h, apiKey: apiKey, base: baseURL}
 }
 
-// Name satisfies domain.MarketProvider.
-func (c *Client) Name() string { return "alphavantage" }
+// Name implements domain.Provider.
+func (c *Client) Name() string { return name }
 
-// --- Quote ---
-
-// globalQuoteResponse maps the Alpha Vantage GLOBAL_QUOTE response.
-type globalQuoteResponse struct {
-	GlobalQuote globalQuoteData `json:"Global Quote"`
-	Note        string          `json:"Note"`        // rate limit notice
-	Information string          `json:"Information"` // invalid key / other messages
+// notice holds the free-text fields Alpha Vantage uses instead of HTTP errors.
+type notice struct {
+	Note         string `json:"Note"`
+	Information  string `json:"Information"`
+	ErrorMessage string `json:"Error Message"`
 }
 
-type globalQuoteData struct {
-	Symbol        string `json:"01. symbol"`
-	Open          string `json:"02. open"`
-	High          string `json:"03. high"`
-	Low           string `json:"04. low"`
-	Price         string `json:"05. price"`
-	Volume        string `json:"06. volume"`
-	LatestDay     string `json:"07. latest trading day"`
-	PreviousClose string `json:"08. previous close"`
-	Change        string `json:"09. change"`
-	ChangePct     string `json:"10. change percent"`
-}
-
-// Quote fetches a real-time quote via GLOBAL_QUOTE.
-func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
-	if c.apiKey == "" {
-		return domain.Quote{}, fmt.Errorf("%w: alphavantage requires an API key (set alphavantage.api_key in config)", domain.ErrNoAPIKey)
+func (n notice) err(sym domain.Ticker) error {
+	msg := strings.ToLower(n.Note + " " + n.Information)
+	switch {
+	case n.ErrorMessage != "":
+		return fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
+	case strings.TrimSpace(msg) == "":
+		return nil
+	// The daily-limit message also mentions "premium plans", so check it first.
+	case strings.Contains(msg, "rate limit") || strings.Contains(msg, "per day") ||
+		strings.Contains(msg, "call frequency") || strings.Contains(msg, "requests"):
+		return fmt.Errorf("%s: %w: daily limit reached", name, domain.ErrRateLimited)
+	case strings.Contains(msg, "api key") || strings.Contains(msg, "apikey") || strings.Contains(msg, "premium"):
+		return fmt.Errorf("%s: %w", name, domain.ErrUnauthorized)
+	default:
+		return fmt.Errorf("%s: %w: %s", name, domain.ErrUnavailable, strings.TrimSpace(n.Note+" "+n.Information))
 	}
+}
 
-	u := fmt.Sprintf("%s?%s", c.base, url.Values{
-		"function": {"GLOBAL_QUOTE"},
-		"symbol":   {strings.ToUpper(string(sym))},
-		"apikey":   {c.apiKey},
-	}.Encode())
+type globalQuote struct {
+	notice
+	Quote struct {
+		Symbol    string `json:"01. symbol"`
+		Open      string `json:"02. open"`
+		High      string `json:"03. high"`
+		Low       string `json:"04. low"`
+		Price     string `json:"05. price"`
+		Volume    string `json:"06. volume"`
+		LatestDay string `json:"07. latest trading day"`
+		PrevClose string `json:"08. previous close"`
+		Change    string `json:"09. change"`
+		ChangePct string `json:"10. change percent"`
+	} `json:"Global Quote"`
+}
 
-	body, err := c.doGet(ctx, u)
-	if err != nil {
+// Quote implements domain.Provider.
+func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
+	var r globalQuote
+	if err := c.get(ctx, url.Values{"function": {"GLOBAL_QUOTE"}, "symbol": {string(sym)}}, &r); err != nil {
 		return domain.Quote{}, err
 	}
-
-	var resp globalQuoteResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return domain.Quote{}, fmt.Errorf("decode alphavantage: %w", err)
+	if err := r.err(sym); err != nil {
+		return domain.Quote{}, err
+	}
+	gq := r.Quote
+	price := num(gq.Price)
+	if price == 0 {
+		return domain.Quote{}, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
 	}
 
-	// Check for rate limit / error messages.
-	if resp.Note != "" {
-		return domain.Quote{}, fmt.Errorf("%w: alphavantage daily limit reached", domain.ErrRateLimited)
-	}
-	if resp.Information != "" {
-		if strings.Contains(strings.ToLower(resp.Information), "invalid") ||
-			strings.Contains(strings.ToLower(resp.Information), "premium") {
-			return domain.Quote{}, fmt.Errorf("%w: alphavantage: %s", domain.ErrUnauthorized, resp.Information)
-		}
-		return domain.Quote{}, fmt.Errorf("%w: alphavantage: %s", domain.ErrRateLimited, resp.Information)
-	}
-
-	gq := resp.GlobalQuote
-	if gq.Symbol == "" && gq.Price == "" {
-		return domain.Quote{}, fmt.Errorf("%w: %s", domain.ErrNotFound, sym)
-	}
-
-	price := parseFloat(gq.Price)
-	prevClose := parseFloat(gq.PreviousClose)
-	change := parseFloat(gq.Change)
-	changePct := parseFloat(strings.TrimSuffix(gq.ChangePct, "%"))
-
-	if price == 0 && prevClose == 0 {
-		return domain.Quote{}, fmt.Errorf("%w: %s (all zeros)", domain.ErrNotFound, sym)
-	}
-
+	now := time.Now().UTC()
 	q := domain.Quote{
 		Symbol:    sym,
 		Price:     price,
-		PrevClose: prevClose,
-		Change:    change,
-		ChangePct: changePct,
-		Source:    domain.SourceAlphaVantage,
-		FetchedAt: time.Now().UTC(),
-		Partial:   true, // no fundamentals from GLOBAL_QUOTE
+		PrevClose: num(gq.PrevClose),
+		Change:    num(gq.Change),
+		ChangePct: num(strings.TrimSuffix(gq.ChangePct, "%")),
+		AsOf:      now,
+		FetchedAt: now,
+		Source:    name,
+		Partial:   true, // GLOBAL_QUOTE has no identity or fundamentals
 	}
-
-	if v := parseFloat(gq.Open); v > 0 {
-		q.Open = domain.Some(v)
+	if t, err := time.Parse("2006-01-02", gq.LatestDay); err == nil {
+		q.AsOf = t
 	}
-	if v := parseFloat(gq.High); v > 0 {
-		q.DayHigh = domain.Some(v)
-	}
-	if v := parseFloat(gq.Low); v > 0 {
-		q.DayLow = domain.Some(v)
-	}
-	if v := parseInt(gq.Volume); v > 0 {
+	setPositive(&q.Open, num(gq.Open))
+	setPositive(&q.DayHigh, num(gq.High))
+	setPositive(&q.DayLow, num(gq.Low))
+	if v := int64(num(gq.Volume)); v > 0 {
 		q.Volume = domain.Some(v)
 	}
-	if gq.LatestDay != "" {
-		if t, err := time.Parse("2006-01-02", gq.LatestDay); err == nil {
-			q.AsOf = t
-		}
-	}
-
 	return q, nil
 }
 
-// --- History ---
-
-type dailyResponse struct {
-	MetaData   dailyMeta                  `json:"Meta Data"`
-	TimeSeries map[string]dailyDataPoint  `json:"Time Series (Daily)"`
-	Note       string                     `json:"Note"`
-	Information string                    `json:"Information"`
+type dailySeries struct {
+	notice
+	Series map[string]struct {
+		Open   string `json:"1. open"`
+		High   string `json:"2. high"`
+		Low    string `json:"3. low"`
+		Close  string `json:"4. close"`
+		Volume string `json:"5. volume"`
+	} `json:"Time Series (Daily)"`
 }
 
-type dailyMeta struct {
-	Symbol      string `json:"2. Symbol"`
-	LastRefresh string `json:"3. Last Refreshed"`
-}
-
-type dailyDataPoint struct {
-	Open   string `json:"1. open"`
-	High   string `json:"2. high"`
-	Low    string `json:"3. low"`
-	Close  string `json:"4. close"`
-	Volume string `json:"5. volume"`
-}
-
-// History fetches daily OHLCV candles via TIME_SERIES_DAILY.
-func (c *Client) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("%w: alphavantage requires an API key", domain.ErrNoAPIKey)
-	}
-
-	u := fmt.Sprintf("%s?%s", c.base, url.Values{
-		"function":   {"TIME_SERIES_DAILY"},
-		"symbol":     {strings.ToUpper(string(sym))},
-		"outputsize": {"compact"}, // latest 100 data points
-		"apikey":     {c.apiKey},
-	}.Encode())
-
-	body, err := c.doGet(ctx, u)
-	if err != nil {
+// History implements domain.Provider (compact output: last 100 sessions).
+func (c *Client) History(ctx context.Context, sym domain.Ticker, sessions int) ([]domain.Candle, error) {
+	var r dailySeries
+	q := url.Values{"function": {"TIME_SERIES_DAILY"}, "symbol": {string(sym)}, "outputsize": {"compact"}}
+	if err := c.get(ctx, q, &r); err != nil {
 		return nil, err
 	}
-
-	var resp dailyResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode alphavantage: %w", err)
+	if err := r.err(sym); err != nil {
+		return nil, err
 	}
-
-	if resp.Note != "" {
-		return nil, fmt.Errorf("%w: alphavantage daily limit reached", domain.ErrRateLimited)
-	}
-	if resp.Information != "" {
-		return nil, fmt.Errorf("%w: alphavantage: %s", domain.ErrRateLimited, resp.Information)
-	}
-
-	if len(resp.TimeSeries) == 0 {
-		return nil, fmt.Errorf("%w: %s no history data", domain.ErrNotFound, sym)
-	}
-
-	// Collect and sort dates.
-	all := make([]dated, 0, len(resp.TimeSeries))
-	for dateStr, dp := range resp.TimeSeries {
-		t, err := time.Parse("2006-01-02", dateStr)
-		if err != nil {
+	out := make([]domain.Candle, 0, len(r.Series))
+	for day, v := range r.Series {
+		t, err := time.Parse("2006-01-02", day)
+		if err != nil || num(v.Close) == 0 {
 			continue
 		}
-		all = append(all, dated{t: t, d: dp})
-	}
-
-	// Sort chronologically (oldest first).
-	sortDated(all)
-
-	// Trim to requested sessions.
-	sessions := r.Sessions
-	if sessions <= 0 {
-		sessions = 22
-	}
-	if len(all) > sessions {
-		all = all[len(all)-sessions:]
-	}
-
-	candles := make([]domain.Candle, 0, len(all))
-	for _, item := range all {
-		cl := parseFloat(item.d.Close)
-		if cl == 0 {
-			continue
-		}
-		candles = append(candles, domain.Candle{
-			Time:   item.t,
-			Open:   parseFloat(item.d.Open),
-			High:   parseFloat(item.d.High),
-			Low:    parseFloat(item.d.Low),
-			Close:  cl,
-			Volume: parseInt(item.d.Volume),
+		out = append(out, domain.Candle{
+			Time: t, Open: num(v.Open), High: num(v.High), Low: num(v.Low),
+			Close: num(v.Close), Volume: int64(num(v.Volume)),
 		})
 	}
-
-	if len(candles) == 0 {
-		return nil, fmt.Errorf("%w: empty candles", domain.ErrPartialData)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: %w: empty series", name, domain.ErrNoData)
 	}
-	return candles, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	if len(out) > sessions {
+		out = out[len(out)-sessions:]
+	}
+	return out, nil
 }
 
-// --- HTTP helpers ---
-
-func (c *Client) doGet(ctx context.Context, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+func (c *Client) get(ctx context.Context, q url.Values, out any) error {
+	if c.apiKey == "" {
+		return fmt.Errorf("%s: %w", name, domain.ErrNoAPIKey)
+	}
+	q.Set("apikey", c.apiKey)
+	body, err := c.http.GetJSON(ctx, name, c.base+"?"+q.Encode(), nil, 2<<20)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", domain.ErrNetwork, err)
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("%s: decode: %w", name, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("%w: alphavantage", domain.ErrRateLimited)
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%w: alphavantage", domain.ErrUnauthorized)
-	}
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("%w: alphavantage http %d", domain.ErrUnavailable, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20)) // 2MB max
-	if err != nil {
-		return nil, fmt.Errorf("%w: read body: %v", domain.ErrNetwork, err)
-	}
-	return body, nil
+	return nil
 }
 
-// --- parsing helpers ---
-
-func parseFloat(s string) float64 {
+func num(s string) float64 {
 	v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return v
 }
 
-func parseInt(s string) int64 {
-	v, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	return v
-}
-
-// dated pairs a time with a data point for sorting.
-type dated struct {
-	t time.Time
-	d dailyDataPoint
-}
-
-// sortDated sorts a slice of dated items chronologically (oldest first).
-func sortDated(items []dated) {
-	// Simple insertion sort — the dataset is at most 100 items.
-	for i := 1; i < len(items); i++ {
-		key := items[i]
-		j := i - 1
-		for j >= 0 && items[j].t.After(key.t) {
-			items[j+1] = items[j]
-			j--
-		}
-		items[j+1] = key
+func setPositive(dst *domain.Optional[float64], v float64) {
+	if v > 0 {
+		*dst = domain.Some(v)
 	}
 }

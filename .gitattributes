@@ -1,0 +1,4 @@
+# Keep LF everywhere, also when checked out on Windows.
+* text=auto eol=lf
+*.gif binary
+*.png binary

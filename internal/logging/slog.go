@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -13,13 +14,16 @@ import (
 const maxLogSize = 5 * 1024 * 1024 // 5 MiB
 
 // Setup returns a slog.Logger that writes to path if debug is true, otherwise
-// a no-op logger. It truncates path when it exceeds 5 MiB at startup.
+// a no-op logger. The file is truncated at startup when it exceeds 5 MiB.
 // The returned io.Closer closes the underlying file (or a no-op in non-debug mode).
 func Setup(path string, debug bool) (*slog.Logger, io.Closer, error) {
 	if !debug {
 		return slog.New(discardHandler{}), noopCloser{}, nil
 	}
 
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, nil, err
+	}
 	if st, err := os.Stat(path); err == nil && st.Size() > maxLogSize {
 		_ = os.Truncate(path, 0)
 	}
@@ -35,16 +39,16 @@ func Setup(path string, debug bool) (*slog.Logger, io.Closer, error) {
 
 // --- redaction ---
 
-var (
-	tokenQuery = regexp.MustCompile(`([?&]token=)[^&\s"]+`)
-	bearer     = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._-]+`)
-	figiHeader = regexp.MustCompile(`(?i)(x-openfigi-apikey[:=]\s*)[A-Za-z0-9._-]+`)
-)
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)([?&](?:token|apikey|api_key)=)[^&\s"]+`),
+	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._-]+`),
+	regexp.MustCompile(`(?i)((?:x-openfigi-apikey|x-finnhub-token)[:=]\s*)[A-Za-z0-9._-]+`),
+}
 
 func redact(s string) string {
-	s = tokenQuery.ReplaceAllString(s, "${1}***")
-	s = bearer.ReplaceAllString(s, "${1}***")
-	s = figiHeader.ReplaceAllString(s, "${1}***")
+	for _, re := range secretPatterns {
+		s = re.ReplaceAllString(s, "${1}***")
+	}
 	return s
 }
 
@@ -97,10 +101,10 @@ func looksSensitiveKey(k string) bool {
 
 type discardHandler struct{}
 
-func (discardHandler) Enabled(context.Context, slog.Level) bool      { return false }
-func (discardHandler) Handle(context.Context, slog.Record) error     { return nil }
-func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler          { return d }
-func (d discardHandler) WithGroup(string) slog.Handler               { return d }
+func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
+func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
+func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
+func (d discardHandler) WithGroup(string) slog.Handler           { return d }
 
 type noopCloser struct{}
 

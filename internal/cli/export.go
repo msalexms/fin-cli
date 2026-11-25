@@ -1,165 +1,93 @@
 package cli
 
 import (
-	"context"
 	"encoding/csv"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/app"
+	"github.com/msalexms/fin-cli/internal/domain"
 )
 
-// exportRow is the data shape written by `fin-cli export`.
-type exportRow struct {
-	Symbol    string    `json:"symbol"`
-	Name      string    `json:"name"`
-	Price     float64   `json:"price"`
-	Change    float64   `json:"change"`
-	ChangePct float64   `json:"change_pct"`
-	Volume    int64     `json:"volume"`
-	MarketCap float64   `json:"market_cap"`
-	Currency  string    `json:"currency"`
-	Exchange  string    `json:"exchange"`
-	Source    string    `json:"source"`
-	FetchedAt time.Time `json:"fetched_at"`
-}
-
-// NewExportCmd returns `fin-cli export`.
-func NewExportCmd(appFactory func() (*App, error)) *cobra.Command {
-	var (
-		format string
-		output string
-	)
+func newExportCmd(withApp appRunner) *cobra.Command {
+	var format, output string
 	cmd := &cobra.Command{
 		Use:   "export",
-		Short: "Export watchlist quotes to CSV or JSON",
-		Long: `Export the current watchlist with latest quote data.
-Uses cached data when fresh; does not force-refresh by default.
-
-Examples:
-  fin-cli export                     # CSV to stdout
-  fin-cli export --format=json       # JSON to stdout
-  fin-cli export --output=quotes.csv # CSV to file`,
-		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := appFactory()
+		Short: "Export watchlist quotes as CSV or JSON",
+		Long: `Export the latest quote of every watchlist ticker. Quotes younger than the
+polling interval are served from the cache. Tickers that fail are reported on
+stderr and skipped.`,
+		Example: "  fin-cli export\n  fin-cli export -f json -o quotes.json",
+		Args:    usageArgs(cobra.NoArgs),
+		RunE: withApp(func(cmd *cobra.Command, _ []string, a *app.App) error {
+			if format != "csv" && format != "json" {
+				return invalidFormat(format, "csv", "json")
+			}
+			ts, err := a.Watchlist.Load()
 			if err != nil {
 				return err
 			}
-			defer app.Close()
-
-			ts, err := app.Watchlist.Load()
-			if err != nil {
-				return exitError(err)
-			}
 			if len(ts) == 0 {
-				fmt.Fprintln(os.Stderr, "watchlist is empty; nothing to export")
-				return nil
+				return fmt.Errorf("%w: watchlist is empty", domain.ErrInvalidInput)
 			}
 
-			ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-			defer cancel()
-
-			// Gather quotes (from cache when available).
-			rows := make([]exportRow, 0, len(ts))
+			var qs []domain.Quote
+			var errs []error
 			for _, t := range ts {
-				q, qerr := app.Quotes.Get(ctx, t, false)
-				if qerr != nil {
-					fmt.Fprintf(os.Stderr, "warning: %s: %v\n", t, qerr)
+				q, err := a.Quotes.Get(cmd.Context(), t, false)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %v\n", t, err)
+					errs = append(errs, err)
 					continue
 				}
-				vol := int64(0)
-				if q.Volume.Valid {
-					vol = q.Volume.Value
-				}
-				mcap := 0.0
-				if q.MarketCap.Valid {
-					mcap = q.MarketCap.Value
-				}
-				rows = append(rows, exportRow{
-					Symbol:    string(q.Symbol),
-					Name:      q.Name,
-					Price:     q.Price,
-					Change:    q.Change,
-					ChangePct: q.ChangePct,
-					Volume:    vol,
-					MarketCap: mcap,
-					Currency:  q.Currency,
-					Exchange:  q.Exchange,
-					Source:    string(q.Source),
-					FetchedAt: q.FetchedAt,
-				})
+				qs = append(qs, q)
+			}
+			if len(qs) == 0 {
+				return fmt.Errorf("no quote could be fetched: %w", errors.Join(errs...))
 			}
 
-			if len(rows) == 0 {
-				return exitError(fmt.Errorf("%w: no data available for any ticker", domain.ErrPartialData))
-			}
-
-			// Determine output writer.
-			w := os.Stdout
+			var w io.Writer = cmd.OutOrStdout()
 			if output != "" {
-				f, ferr := os.Create(output)
-				if ferr != nil {
-					return exitError(ferr)
+				f, err := os.Create(output)
+				if err != nil {
+					return err
 				}
 				defer f.Close()
 				w = f
 			}
-
-			switch format {
-			case "csv", "":
-				return writeExportCSV(w, rows)
-			case "json":
-				return writeExportJSON(w, rows)
-			default:
-				return exitError(fmt.Errorf("%w: unknown format %q (use csv or json)", domain.ErrInvalidInput, format))
+			if format == "json" {
+				return writeJSON(w, map[string][]domain.Quote{"quotes": qs})
 			}
-		},
+			return writeCSV(w, qs)
+		}),
 	}
-	cmd.Flags().StringVar(&format, "format", "csv", "output format: csv|json")
-	cmd.Flags().StringVarP(&output, "output", "o", "", "output file (default: stdout)")
+	cmd.Flags().StringVarP(&format, "format", "f", "csv", "output format: csv|json")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "write to this file instead of stdout")
 	return cmd
 }
 
-func writeExportCSV(w *os.File, rows []exportRow) error {
+func writeCSV(w io.Writer, qs []domain.Quote) error {
 	cw := csv.NewWriter(w)
-	defer cw.Flush()
-
-	// Header
-	if err := cw.Write([]string{
-		"Symbol", "Name", "Price", "Change", "Change%", "Volume",
-		"MarketCap(M)", "Currency", "Exchange", "Source", "FetchedAt",
-	}); err != nil {
-		return err
-	}
-
-	for _, r := range rows {
-		rec := []string{
-			r.Symbol,
-			r.Name,
-			fmt.Sprintf("%.4f", r.Price),
-			fmt.Sprintf("%.4f", r.Change),
-			fmt.Sprintf("%.2f", r.ChangePct),
-			fmt.Sprintf("%d", r.Volume),
-			fmt.Sprintf("%.2f", r.MarketCap),
-			r.Currency,
-			r.Exchange,
-			r.Source,
-			r.FetchedAt.Format(time.RFC3339),
+	_ = cw.Write([]string{"symbol", "name", "price", "change", "change_pct", "currency",
+		"volume", "market_cap_millions", "exchange", "source", "stale", "as_of"})
+	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+	for _, q := range qs {
+		vol, mcap := "", ""
+		if q.Volume.Valid {
+			vol = strconv.FormatInt(q.Volume.Value, 10)
 		}
-		if err := cw.Write(rec); err != nil {
-			return err
+		if q.MarketCap.Valid {
+			mcap = f(q.MarketCap.Value)
 		}
+		_ = cw.Write([]string{string(q.Symbol), q.Name, f(q.Price), f(q.Change), f(q.ChangePct), q.Currency,
+			vol, mcap, q.Exchange, q.Source, strconv.FormatBool(q.Stale), q.AsOf.Format(time.RFC3339)})
 	}
+	cw.Flush()
 	return cw.Error()
-}
-
-func writeExportJSON(w *os.File, rows []exportRow) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(map[string]any{"quotes": rows})
 }
