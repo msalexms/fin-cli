@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -23,7 +23,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 func TestQuote_Success(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"symbol": "AAPL",
 			"name": "Apple Inc",
 			"exchange": "NASDAQ",
@@ -36,8 +36,8 @@ func TestQuote_Success(t *testing.T) {
 			"change": "2.75",
 			"percent_change": "1.83",
 			"volume": "85000000",
-			"fifty_two_week_high": "199.62",
-			"fifty_two_week_low": "124.17",
+			"is_market_open": true,
+			"fifty_two_week": {"low": "124.17", "high": "199.62", "range": "124.17 - 199.62"},
 			"timestamp": 1700000000
 		}`))
 	})
@@ -64,7 +64,7 @@ func TestQuote_Success(t *testing.T) {
 	if q.Name != "Apple Inc" {
 		t.Errorf("Name = %q, want Apple Inc", q.Name)
 	}
-	if q.Source != domain.SourceTwelveData {
+	if q.Source != "twelvedata" {
 		t.Errorf("Source = %q, want twelvedata", q.Source)
 	}
 	if !q.Open.Valid || q.Open.Value != 150.0 {
@@ -76,12 +76,15 @@ func TestQuote_Success(t *testing.T) {
 	if !q.Week52High.Valid || q.Week52High.Value != 199.62 {
 		t.Errorf("Week52High = %+v, want Some(199.62)", q.Week52High)
 	}
+	if q.Session != domain.SessionRegular {
+		t.Errorf("Session = %q, want regular", q.Session)
+	}
 }
 
 func TestQuote_NotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"status": "error",
 			"code": 400,
 			"message": "**symbol** not found: ZZZZ. Please specify it correctly according to API documentation."
@@ -153,7 +156,7 @@ func TestQuote_NoAPIKey(t *testing.T) {
 func TestHistory_Success(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"meta": {"symbol": "AAPL", "interval": "1day", "currency": "USD", "exchange": "NASDAQ"},
 			"values": [
 				{"datetime": "2024-01-05", "open": "150", "high": "152", "low": "149", "close": "151", "volume": "70000000"},
@@ -163,7 +166,7 @@ func TestHistory_Success(t *testing.T) {
 		}`))
 	})
 
-	candles, err := c.History(context.Background(), "AAPL", domain.DefaultRange)
+	candles, err := c.History(context.Background(), "AAPL", domain.HistorySessions)
 	if err != nil {
 		t.Fatalf("History() error: %v", err)
 	}
@@ -184,14 +187,14 @@ func TestHistory_Success(t *testing.T) {
 func TestHistory_NotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"status": "error",
 			"code": 400,
 			"message": "**symbol** not found"
 		}`))
 	})
 
-	_, err := c.History(context.Background(), "ZZZZ", domain.DefaultRange)
+	_, err := c.History(context.Background(), "ZZZZ", domain.HistorySessions)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -202,7 +205,7 @@ func TestHistory_NotFound(t *testing.T) {
 
 func TestHistory_NoAPIKey(t *testing.T) {
 	c := New(httpx.New(), "")
-	_, err := c.History(context.Background(), "AAPL", domain.DefaultRange)
+	_, err := c.History(context.Background(), "AAPL", domain.HistorySessions)
 	if err == nil {
 		t.Fatal("expected error")
 	}

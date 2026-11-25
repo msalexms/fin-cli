@@ -1,138 +1,144 @@
-// Package yahoo implements domain.MarketProvider against the public
-// (unofficial) Yahoo Finance chart endpoint at
+// Package yahoo implements domain.Provider against the public (unofficial)
+// Yahoo Finance chart endpoint:
 //
 //	https://query1.finance.yahoo.com/v8/finance/chart/{symbol}
 //
-// No API key or authentication is required. The endpoint is not officially
-// documented by Yahoo; it may break at any time. We treat it as a best-effort
-// source for free historical candles and basic quotes (global coverage).
+// It needs no API key and covers global markets, crypto and FX, which makes
+// it the default fallback. It is undocumented and may change without notice.
 package yahoo
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
-const baseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
+const (
+	name    = "yahoo"
+	baseURL = "https://query1.finance.yahoo.com/v8/finance/chart"
+	// Yahoo rejects library User-Agents with 429/403.
+	userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
-// Browser-like User-Agent: Yahoo's endpoint has been observed to reject
-// generic/library UAs with 429/403.
-const userAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-
-// Client implements domain.MarketProvider (Quote + History).
+// Client implements domain.Provider.
 type Client struct {
 	http *httpx.Client
 	base string
+	now  func() time.Time
 }
 
 // New returns a Client.
-func New(h *httpx.Client) *Client { return &Client{http: h, base: baseURL} }
+func New(h *httpx.Client) *Client { return &Client{http: h, base: baseURL, now: time.Now} }
 
-// Name satisfies domain.MarketProvider.
-func (c *Client) Name() string { return "yahoo" }
+// Name implements domain.Provider.
+func (c *Client) Name() string { return name }
 
 type response struct {
 	Chart struct {
 		Result []result `json:"result"`
-		Error  *apiErr  `json:"error"`
+		Error  *struct {
+			Code        string `json:"code"`
+			Description string `json:"description"`
+		} `json:"error"`
 	} `json:"chart"`
 }
 
-type apiErr struct {
-	Code        string `json:"code"`
-	Description string `json:"description"`
+type result struct {
+	Meta       meta    `json:"meta"`
+	Timestamp  []int64 `json:"timestamp"`
+	Indicators struct {
+		Quote []struct {
+			Open   []*float64 `json:"open"`
+			High   []*float64 `json:"high"`
+			Low    []*float64 `json:"low"`
+			Close  []*float64 `json:"close"`
+			Volume []*int64   `json:"volume"`
+		} `json:"quote"`
+	} `json:"indicators"`
 }
 
-type result struct {
-	Meta       meta        `json:"meta"`
-	Timestamp  []int64     `json:"timestamp"`
-	Indicators indicatorsT `json:"indicators"`
+type period struct {
+	Start int64 `json:"start"`
+	End   int64 `json:"end"`
 }
 
 type meta struct {
-	Currency             string  `json:"currency"`
-	Symbol               string  `json:"symbol"`
-	Exchange             string  `json:"exchangeName"`
-	FullExchangeName     string  `json:"fullExchangeName"`
-	InstrumentType       string  `json:"instrumentType"`
-	RegularMarketPrice   float64 `json:"regularMarketPrice"`
-	ChartPreviousClose   float64 `json:"chartPreviousClose"`
-	PreviousClose        float64 `json:"previousClose"`
-	RegularMarketDayHigh float64 `json:"regularMarketDayHigh"`
-	RegularMarketDayLow  float64 `json:"regularMarketDayLow"`
-	RegularMarketVolume  int64   `json:"regularMarketVolume"`
-	FiftyTwoWeekHigh     float64 `json:"fiftyTwoWeekHigh"`
-	FiftyTwoWeekLow      float64 `json:"fiftyTwoWeekLow"`
-	RegularMarketTime    int64   `json:"regularMarketTime"`
-	Timezone             string  `json:"timezone"`
+	Currency             string   `json:"currency"`
+	FullExchangeName     string   `json:"fullExchangeName"`
+	LongName             string   `json:"longName"`
+	ShortName            string   `json:"shortName"`
+	RegularMarketPrice   float64  `json:"regularMarketPrice"`
+	RegularMarketTime    int64    `json:"regularMarketTime"`
+	RegularMarketDayHigh float64  `json:"regularMarketDayHigh"`
+	RegularMarketDayLow  float64  `json:"regularMarketDayLow"`
+	RegularMarketVolume  int64    `json:"regularMarketVolume"`
+	RegularChangePct     *float64 `json:"regularMarketChangePercent"`
+	FulldayChange        *float64 `json:"fulldayChange"`
+	PreviousClose        float64  `json:"previousClose"`
+	FiftyTwoWeekHigh     float64  `json:"fiftyTwoWeekHigh"`
+	FiftyTwoWeekLow      float64  `json:"fiftyTwoWeekLow"`
+	CurrentTradingPeriod struct {
+		Pre     period `json:"pre"`
+		Regular period `json:"regular"`
+		Post    period `json:"post"`
+	} `json:"currentTradingPeriod"`
 }
 
-type indicatorsT struct {
-	Quote    []quoteSeries    `json:"quote"`
-	AdjClose []adjCloseSeries `json:"adjclose"`
-}
-
-type quoteSeries struct {
-	Open   []float64 `json:"open"`
-	High   []float64 `json:"high"`
-	Low    []float64 `json:"low"`
-	Close  []float64 `json:"close"`
-	Volume []int64   `json:"volume"`
-}
-
-type adjCloseSeries struct {
-	AdjClose []float64 `json:"adjclose"`
-}
-
-// Quote fetches a basic quote snapshot via the chart endpoint's meta field.
-// Yahoo provides global coverage but no fundamentals (P/E, EPS, Beta, etc.).
-// The returned Quote always has Partial=true.
+// Quote implements domain.Provider. Yahoo's chart endpoint carries no
+// fundamentals, so quotes are always Partial.
 func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
-	r0, err := c.fetchChart(ctx, sym, "5d", "1d")
+	r, err := c.fetch(ctx, sym, "5d")
 	if err != nil {
 		return domain.Quote{}, err
 	}
-
-	m := r0.Meta
-	if m.RegularMarketPrice == 0 && m.PreviousClose == 0 {
-		return domain.Quote{}, fmt.Errorf("%w: %s (all zeros)", domain.ErrNotFound, sym)
+	m := r.Meta
+	if m.RegularMarketPrice == 0 {
+		return domain.Quote{}, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
 	}
 
-	prevClose := m.PreviousClose
-	if prevClose == 0 {
-		prevClose = m.ChartPreviousClose
-	}
 	price := m.RegularMarketPrice
-	change := price - prevClose
-	var changePct float64
-	if prevClose != 0 {
-		changePct = (change / prevClose) * 100
+	prev := previousClose(r)
+	change := price - prev
+	if m.FulldayChange != nil {
+		change = *m.FulldayChange
+		prev = price - change
+	}
+	prev, change = round6(prev), round6(change)
+	var pct float64
+	switch {
+	case m.RegularChangePct != nil:
+		pct = *m.RegularChangePct
+	case prev != 0:
+		pct = change / prev * 100
 	}
 
+	now := c.now()
 	q := domain.Quote{
 		Symbol:    sym,
+		Name:      firstNonEmpty(m.LongName, m.ShortName),
 		Currency:  m.Currency,
 		Exchange:  m.FullExchangeName,
 		Price:     price,
-		PrevClose: prevClose,
+		PrevClose: prev,
 		Change:    change,
-		ChangePct: changePct,
-		Source:    domain.SourceYahoo,
-		FetchedAt: time.Now().UTC(),
-		Partial:   true, // no fundamentals from Yahoo
+		ChangePct: pct,
+		Session:   session(m, now),
+		AsOf:      time.Unix(m.RegularMarketTime, 0).UTC(),
+		FetchedAt: now.UTC(),
+		Source:    name,
+		Partial:   true,
 	}
-
-	// Day range from meta.
+	if m.RegularMarketTime == 0 {
+		q.AsOf = q.FetchedAt
+	}
 	if m.RegularMarketDayHigh > 0 {
 		q.DayHigh = domain.Some(m.RegularMarketDayHigh)
 	}
@@ -148,162 +154,156 @@ func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, er
 	if m.FiftyTwoWeekLow > 0 {
 		q.Week52Low = domain.Some(m.FiftyTwoWeekLow)
 	}
-
-	// Try to derive Open from the first candle of the latest day.
-	if len(r0.Indicators.Quote) > 0 {
-		qs := r0.Indicators.Quote[0]
-		if n := len(qs.Open); n > 0 && qs.Open[n-1] > 0 {
-			q.Open = domain.Some(qs.Open[n-1])
-		}
+	if bars := candles(r); len(bars) > 0 && sameDay(bars[len(bars)-1].Time, q.AsOf) {
+		q.Open = domain.Some(bars[len(bars)-1].Open)
 	}
-
-	// Set AsOf from the regular market time.
-	if m.RegularMarketTime > 0 {
-		q.AsOf = time.Unix(m.RegularMarketTime, 0).UTC()
-	}
-
 	return q, nil
 }
 
-// History fetches ~r.Sessions daily candles.
-// Yahoo's range values are pre-set strings; we pick the smallest range that
-// covers the requested number of sessions and then trim.
-func (c *Client) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
-	sessions := r.Sessions
-	if sessions <= 0 {
-		sessions = 22
-	}
-	rng := selectRange(sessions)
-
-	r0, err := c.fetchChart(ctx, sym, rng, "1d")
+// History implements domain.Provider.
+func (c *Client) History(ctx context.Context, sym domain.Ticker, sessions int) ([]domain.Candle, error) {
+	r, err := c.fetch(ctx, sym, rangeFor(sessions))
 	if err != nil {
 		return nil, err
 	}
-
-	if len(r0.Timestamp) == 0 || len(r0.Indicators.Quote) == 0 {
-		return nil, fmt.Errorf("%w: no candles", domain.ErrPartialData)
+	out := candles(r)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: %w: empty series", name, domain.ErrNoData)
 	}
+	if len(out) > sessions {
+		out = out[len(out)-sessions:]
+	}
+	return out, nil
+}
 
-	qs := r0.Indicators.Quote[0]
-	n := len(r0.Timestamp)
-	candles := make([]domain.Candle, 0, n)
-	for i := 0; i < n; i++ {
-		// Yahoo returns nulls for missing values as 0 after unmarshal; skip
-		// rows with zero close to avoid polluting the chart.
-		if at(qs.Close, i) == 0 {
+func (c *Client) fetch(ctx context.Context, sym domain.Ticker, rng string) (*result, error) {
+	q := url.Values{"interval": {"1d"}, "range": {rng}, "includePrePost": {"false"}}
+	u := c.base + "/" + url.PathEscape(string(sym)) + "?" + q.Encode()
+	body, err := c.http.GetJSON(ctx, name, u, http.Header{"User-Agent": {userAgent}}, 2<<20)
+	if err != nil {
+		return nil, err
+	}
+	var resp response
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("%s: decode: %w", name, err)
+	}
+	if e := resp.Chart.Error; e != nil {
+		if strings.EqualFold(e.Code, "Not Found") || strings.Contains(strings.ToLower(e.Description), "no data") {
+			return nil, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
+		}
+		return nil, fmt.Errorf("%s: %s", name, e.Description)
+	}
+	if len(resp.Chart.Result) == 0 {
+		return nil, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
+	}
+	return &resp.Chart.Result[0], nil
+}
+
+// candles converts the indicator arrays, skipping bars with a null close.
+func candles(r *result) []domain.Candle {
+	if len(r.Indicators.Quote) == 0 {
+		return nil
+	}
+	ind := r.Indicators.Quote[0]
+	out := make([]domain.Candle, 0, len(r.Timestamp))
+	for i, ts := range r.Timestamp {
+		cl := at(ind.Close, i)
+		if cl == 0 {
 			continue
 		}
-		candles = append(candles, domain.Candle{
-			Time:   time.Unix(r0.Timestamp[i], 0).UTC(),
-			Open:   at(qs.Open, i),
-			High:   at(qs.High, i),
-			Low:    at(qs.Low, i),
-			Close:  qs.Close[i],
-			Volume: atI(qs.Volume, i),
+		var vol int64
+		if i < len(ind.Volume) && ind.Volume[i] != nil {
+			vol = *ind.Volume[i]
+		}
+		out = append(out, domain.Candle{
+			Time:   time.Unix(ts, 0).UTC(),
+			Open:   at(ind.Open, i),
+			High:   at(ind.High, i),
+			Low:    at(ind.Low, i),
+			Close:  cl,
+			Volume: vol,
 		})
 	}
-	if len(candles) == 0 {
-		return nil, fmt.Errorf("%w: empty candles", domain.ErrPartialData)
-	}
-	if len(candles) > sessions {
-		candles = candles[len(candles)-sessions:]
-	}
-	return candles, nil
+	return out
 }
 
-// fetchChart is the shared HTTP request logic for the Yahoo chart endpoint.
-func (c *Client) fetchChart(ctx context.Context, sym domain.Ticker, rng, interval string) (*result, error) {
-	u := fmt.Sprintf("%s/%s?%s", c.base, url.PathEscape(strings.ToUpper(string(sym))),
-		url.Values{
-			"interval":       {interval},
-			"range":          {rng},
-			"includePrePost": {"false"},
-			"events":         {"div,splits"},
-		}.Encode(),
-	)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
+// previousClose finds the close of the session before the latest quote.
+// meta.chartPreviousClose is not used: it is the close before the whole
+// requested range, not before today.
+func previousClose(r *result) float64 {
+	if r.Meta.PreviousClose > 0 {
+		return r.Meta.PreviousClose
 	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", domain.ErrNetwork, err)
+	bars := candles(r)
+	if len(bars) == 0 {
+		return 0
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("%w: yahoo", domain.ErrRateLimited)
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w: %s", domain.ErrNotFound, sym)
-	}
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("%w: yahoo http %d", domain.ErrUnavailable, resp.StatusCode)
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("%w: yahoo http %d: %s", domain.ErrNetwork, resp.StatusCode, string(body))
-	}
-
-	var out response
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode yahoo: %w", err)
-	}
-	if out.Chart.Error != nil {
-		if isNotFound(out.Chart.Error) {
-			return nil, fmt.Errorf("%w: %s", domain.ErrNotFound, sym)
+	last := bars[len(bars)-1]
+	if sameDay(last.Time, time.Unix(r.Meta.RegularMarketTime, 0)) {
+		if len(bars) < 2 {
+			return 0
 		}
-		return nil, errors.New("yahoo: " + out.Chart.Error.Description)
+		return bars[len(bars)-2].Close
 	}
-	if len(out.Chart.Result) == 0 {
-		return nil, fmt.Errorf("%w: empty result", domain.ErrPartialData)
-	}
-
-	return &out.Chart.Result[0], nil
+	return last.Close
 }
 
-// selectRange picks the smallest Yahoo range string covering n trading sessions.
-func selectRange(n int) string {
+func session(m meta, now time.Time) domain.MarketSession {
+	p := m.CurrentTradingPeriod
+	if p.Regular.Start == 0 {
+		return domain.SessionUnknown
+	}
+	in := func(x period) bool { return x.Start < x.End && now.Unix() >= x.Start && now.Unix() < x.End }
 	switch {
-	case n <= 5:
+	case in(p.Regular):
+		return domain.SessionRegular
+	case in(p.Pre):
+		return domain.SessionPre
+	case in(p.Post):
+		return domain.SessionPost
+	default:
+		return domain.SessionClosed
+	}
+}
+
+func rangeFor(sessions int) string {
+	switch {
+	case sessions <= 5:
 		return "5d"
-	case n <= 22:
+	case sessions <= 21:
 		return "1mo"
-	case n <= 66:
+	case sessions <= 63:
 		return "3mo"
-	case n <= 130:
+	case sessions <= 126:
 		return "6mo"
-	case n <= 260:
+	case sessions <= 252:
 		return "1y"
 	default:
 		return "2y"
 	}
 }
 
-func isNotFound(e *apiErr) bool {
-	if e == nil {
-		return false
-	}
-	if strings.EqualFold(e.Code, "Not Found") {
-		return true
-	}
-	return strings.Contains(strings.ToLower(e.Description), "no data")
+func sameDay(a, b time.Time) bool {
+	ay, am, ad := a.UTC().Date()
+	by, bm, bd := b.UTC().Date()
+	return ay == by && am == bm && ad == bd
 }
 
-func at(s []float64, i int) float64 {
-	if i < 0 || i >= len(s) {
+func at(s []*float64, i int) float64 {
+	if i < 0 || i >= len(s) || s[i] == nil {
 		return 0
 	}
-	return s[i]
+	return *s[i]
 }
 
-func atI(s []int64, i int) int64 {
-	if i < 0 || i >= len(s) {
-		return 0
+func firstNonEmpty(ss ...string) string {
+	for _, s := range ss {
+		if s != "" {
+			return s
+		}
 	}
-	return s[i]
+	return ""
 }
+
+// round6 removes float noise from derived prices (354.07000000000005).
+func round6(v float64) float64 { return math.Round(v*1e6) / 1e6 }

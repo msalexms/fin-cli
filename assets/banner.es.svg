@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 264" width="920" height="264" role="img" aria-label="fin-cli — Un proyecto de AMSTech. Monitor financiero de terminal: panel de seguimiento en vivo, cotizaciones y gráficos al momento, sin claves de API.">
+  <title>fin-cli · AMSTech</title>
+  <!-- Hard ink shadow, cream card, white header bar -->
+  <rect x="10" y="10" width="906" height="250" rx="8" fill="#1E1B2E"/>
+  <rect x="4" y="4" width="906" height="250" rx="8" fill="#FFF6E9"/>
+  <path d="M12 4H902A8 8 0 0 1 910 12V54H4V12A8 8 0 0 1 12 4Z" fill="#FFFFFF"/>
+  <line x1="4" y1="54" x2="910" y2="54" stroke="#1E1B2E" stroke-width="2.5"/>
+  <rect x="4" y="4" width="906" height="250" rx="8" fill="none" stroke="#1E1B2E" stroke-width="2.5"/>
+
+  <!-- Top bar: Thor mark and wordmark -->
+  <g transform="translate(22 14) scale(0.62)">
+    <path d="M10 4L21 14h6L38 4l5 14q1 2 1 6v12q0 8-8 8H12q-8 0-8-8V24q0-4 1-6z" fill="#2B36D9" stroke="#1E1B2E" stroke-width="2.6" stroke-linejoin="round"/>
+    <path d="M13 25l6 5-6 5M24 36h10" fill="none" stroke="#FFFFFF" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="62" y="36" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="20" letter-spacing="-0.3">
+    <tspan font-weight="800" fill="#1E1B2E">fin-cli</tspan>
+    <tspan dx="8" font-weight="400" fill="#D5CAB5">|</tspan>
+    <tspan dx="8" font-weight="700" font-size="16" fill="#5A5670">amstech</tspan>
+  </text>
+
+  <!-- Top bar: status and license pills -->
+  <rect x="708" y="15" width="122" height="28" rx="6" fill="#FFFFFF" stroke="#1E1B2E" stroke-width="2"/>
+  <circle cx="726" cy="29" r="4.5" fill="#6FD08C" stroke="#1E1B2E" stroke-width="1.6"/>
+  <text x="738" y="33.5" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="11.5" font-weight="700" letter-spacing="0.6" fill="#1E1B2E">EN DIRECTO</text>
+  <rect x="840" y="15" width="52" height="28" rx="6" fill="#FFE27A" stroke="#1E1B2E" stroke-width="2"/>
+  <text x="866" y="33.5" text-anchor="middle" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="11.5" font-weight="700" letter-spacing="0.6" fill="#1E1B2E">MIT</text>
+
+  <!-- Hero copy -->
+  <text x="28" y="86" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="11.5" font-weight="800" letter-spacing="1.4" fill="#2B36D9">UN PROYECTO DE AMSTECH · CÓDIGO ABIERTO</text>
+  <text x="28" y="128" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="800" letter-spacing="-0.8" fill="#1E1B2E">Tus valores, en la terminal.</text>
+  <text x="28" y="158" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="500" fill="#5A5670">Cotizaciones en vivo, minigráficos y gráfico de un mes · acciones, ETF, cripto y divisas · Un binario Go.</text>
+
+  <!-- Thor Terminal sticker -->
+  <g transform="translate(778 68) rotate(5 36 36) scale(1.34)">
+    <g transform="translate(3 3)" fill="#1E1B2E" stroke="#1E1B2E" stroke-width="11" stroke-linejoin="round">
+      <path d="M16 4l11 10h18L56 4l5 15v15H11V19z"/>
+      <rect x="5" y="23" width="62" height="42" rx="8"/>
+      <rect x="2" y="39" width="8" height="12" rx="4"/>
+      <rect x="62" y="39" width="8" height="12" rx="4"/>
+    </g>
+    <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="11" stroke-linejoin="round">
+      <path d="M16 4l11 10h18L56 4l5 15v15H11V19z"/>
+      <rect x="5" y="23" width="62" height="42" rx="8"/>
+      <rect x="2" y="39" width="8" height="12" rx="4"/>
+      <rect x="62" y="39" width="8" height="12" rx="4"/>
+    </g>
+    <path d="M16 4l11 10h18L56 4l5 15v13H11V19z" fill="#2B36D9" stroke="#1E1B2E" stroke-width="3.2" stroke-linejoin="round"/>
+    <circle cx="24" cy="18.5" r="2.5" fill="#FFFFFF"/>
+    <circle cx="48" cy="18.5" r="2.5" fill="#FFFFFF"/>
+    <rect x="5" y="23" width="62" height="42" rx="8" fill="#18181D" stroke="#1E1B2E" stroke-width="3.2"/>
+    <circle cx="14" cy="29.5" r="2" fill="#FF5C39"/>
+    <circle cx="20.5" cy="29.5" r="2" fill="#FFE27A"/>
+    <circle cx="27" cy="29.5" r="2" fill="#6FD08C"/>
+    <line x1="9" y1="34" x2="63" y2="34" stroke="#4A4A57" stroke-width="1.6"/>
+    <text x="11" y="43.5" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="8.5" font-weight="800" letter-spacing="-0.3" fill="#E9E6E0">fin-cli</text>
+    <g stroke-linecap="round">
+      <line x1="13" y1="50" x2="13" y2="60" stroke="#F0A094" stroke-width="1.2"/><rect x="11.4" y="52" width="3.2" height="5" rx="0.8" fill="#F0A094"/>
+      <line x1="20" y1="49" x2="20" y2="58" stroke="#8FD3A4" stroke-width="1.2"/><rect x="18.4" y="51" width="3.2" height="5" rx="0.8" fill="#8FD3A4"/>
+      <line x1="27" y1="47" x2="27" y2="56" stroke="#8FD3A4" stroke-width="1.2"/><rect x="25.4" y="49" width="3.2" height="5" rx="0.8" fill="#8FD3A4"/>
+      <line x1="34" y1="49" x2="34" y2="58" stroke="#F0A094" stroke-width="1.2"/><rect x="32.4" y="51" width="3.2" height="4" rx="0.8" fill="#F0A094"/>
+      <line x1="41" y1="46" x2="41" y2="55" stroke="#8FD3A4" stroke-width="1.2"/><rect x="39.4" y="47.5" width="3.2" height="5" rx="0.8" fill="#8FD3A4"/>
+      <line x1="48" y1="44" x2="48" y2="53" stroke="#8FD3A4" stroke-width="1.2"/><rect x="46.4" y="45.5" width="3.2" height="5" rx="0.8" fill="#8FD3A4"/>
+      <line x1="55" y1="42" x2="55" y2="51" stroke="#7F89E8" stroke-width="1.2"/><rect x="53.4" y="43.5" width="3.2" height="5" rx="0.8" fill="#7F89E8"/>
+    </g>
+    <rect x="2" y="39" width="8" height="12" rx="4" fill="#2B36D9" stroke="#1E1B2E" stroke-width="2.8"/>
+    <rect x="62" y="39" width="8" height="12" rx="4" fill="#2B36D9" stroke="#1E1B2E" stroke-width="2.8"/>
+  </g>
+
+  <!-- Bottom info strip -->
+  <rect x="24" y="186" width="866" height="54" rx="6" fill="#FFFFFF" stroke="#1E1B2E" stroke-width="2"/>
+  <line x1="240.5" y1="187" x2="240.5" y2="239" stroke="#E9DFCB" stroke-width="1.5"/>
+  <line x1="457" y1="187" x2="457" y2="239" stroke="#E9DFCB" stroke-width="1.5"/>
+  <line x1="673.5" y1="187" x2="673.5" y2="239" stroke="#E9DFCB" stroke-width="1.5"/>
+  <text x="40" y="205" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#5A5670">STACK</text>
+  <text x="40" y="227" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="800" fill="#1E1B2E">Go 1.25 · Bubble Tea</text>
+  <text x="257" y="205" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#5A5670">PROVEEDORES</text>
+  <text x="257" y="227" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="800" fill="#1E1B2E">Yahoo · Finnhub · +2</text>
+  <text x="473" y="205" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#5A5670">CLAVES DE API</text>
+  <text x="473" y="227" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="800" fill="#1E1B2E">Ninguna para empezar</text>
+  <text x="690" y="205" font-family="ui-monospace, 'Cascadia Code', Consolas, Menlo, monospace" font-size="10.5" font-weight="700" letter-spacing="0.9" fill="#5A5670">PLATAFORMAS</text>
+  <text x="690" y="227" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15" font-weight="800" fill="#1E1B2E">Linux · macOS · Windows</text>
+</svg>

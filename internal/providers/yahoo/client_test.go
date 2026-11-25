@@ -3,43 +3,87 @@ package yahoo
 import (
 	"context"
 	"errors"
-	"net"
+	"math"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
-// TestHistory_AAPL is an integration test that hits the real Yahoo endpoint.
-// It is skipped when there is no DNS/network access (e.g. hermetic CI).
-func TestHistory_AAPL(t *testing.T) {
-	if _, err := net.LookupHost("query1.finance.yahoo.com"); err != nil {
-		t.Skipf("no network: %v", err)
-	}
+// Five daily bars; the last one is "today" (regularMarketTime 2026-11-24).
+// chartPreviousClose (352.45) is the close *before the 5-day range* and must
+// not be used as the previous close.
+const fixture = `{"chart":{"result":[{"meta":{"currency":"USD","symbol":"AAPL",
+"fullExchangeName":"NasdaqGS","regularMarketTime":1795620156,"regularMarketPrice":347.40,
+"regularMarketDayHigh":353.84,"regularMarketDayLow":346.76,"regularMarketVolume":9620973,
+"longName":"Apple Inc.","chartPreviousClose":352.45,"fiftyTwoWeekHigh":360.83,"fiftyTwoWeekLow":243.42,
+"currentTradingPeriod":{"pre":{"start":1795597200,"end":1795617000},"regular":{"start":1795617000,"end":1795640400},"post":{"start":1795640400,"end":1795654800}}},
+"timestamp":[1795098600,1795185000,1795444200,1795530600,1795617000],
+"indicators":{"quote":[{"open":[352.9,352.8,347.8,348.0,353.58],"high":[355,354,352,354,353.84],
+"low":[346,340,345,345,346.76],"close":[350.1,349.2,null,354.07,347.40],"volume":[1,2,null,4,9620973]}]}}],"error":null}}`
 
-	c := New(httpx.New())
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	candles, err := c.History(ctx, "AAPL", domain.Range{Sessions: 22, Resolution: domain.ResolutionDaily})
-	if err != nil {
-		// Treat ErrNetwork as skip (transient external failure).
-		if errors.Is(err, domain.ErrNetwork) || errors.Is(err, domain.ErrUnavailable) {
-			t.Skipf("yahoo unavailable: %v", err)
+func newTestClient(t *testing.T, status int, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != userAgent {
+			t.Errorf("User-Agent = %q", r.Header.Get("User-Agent"))
 		}
-		t.Fatalf("History error: %v", err)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(httpx.New())
+	c.base = srv.URL
+	c.now = func() time.Time { return time.Unix(1795620156, 0) } // during the regular session
+	return c
+}
+
+func TestQuote_DailyChangeUsesPreviousSession(t *testing.T) {
+	q, err := newTestClient(t, 200, fixture).Quote(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(candles) == 0 {
-		t.Fatal("expected candles, got 0")
+	if math.Abs(q.PrevClose-354.07) > 1e-9 {
+		t.Errorf("PrevClose = %v, want 354.07 (previous session)", q.PrevClose)
 	}
-	if len(candles) < 10 {
-		t.Fatalf("expected ~22 candles, got %d", len(candles))
+	if math.Abs(q.Change-(347.40-354.07)) > 1e-9 {
+		t.Errorf("Change = %v", q.Change)
 	}
-	last := candles[len(candles)-1]
-	if last.Close <= 0 {
-		t.Fatalf("last candle close should be > 0: %+v", last)
+	if q.Name != "Apple Inc." || q.Session != domain.SessionRegular || !q.Partial {
+		t.Errorf("unexpected quote: %+v", q)
 	}
-	t.Logf("got %d candles, last close = %.2f on %s",
-		len(candles), last.Close, last.Time.Format("2006-01-02"))
+	if !q.Open.Valid || q.Open.Value != 353.58 {
+		t.Errorf("Open = %+v, want today's open", q.Open)
+	}
+}
+
+func TestHistory_SkipsNullBars(t *testing.T) {
+	bars, err := newTestClient(t, 200, fixture).History(context.Background(), "AAPL", 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bars) != 4 {
+		t.Fatalf("len = %d, want 4 (null close skipped)", len(bars))
+	}
+	if !bars[0].Time.Before(bars[3].Time) {
+		t.Error("bars must be oldest first")
+	}
+}
+
+func TestQuote_NotFound(t *testing.T) {
+	body := `{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found, symbol may be delisted"}}}`
+	_, err := newTestClient(t, 404, body).Quote(context.Background(), "NOPE")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestQuote_RateLimited(t *testing.T) {
+	_, err := newTestClient(t, 429, "Too Many Requests").Quote(context.Background(), "AAPL")
+	if !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
 }

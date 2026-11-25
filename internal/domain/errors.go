@@ -2,33 +2,21 @@ package domain
 
 import "errors"
 
-// Sentinel errors exposed by the domain and wrapped by infrastructure/providers.
-// The UI can match via errors.Is to produce actionable messages.
+// Sentinel errors wrapped by providers and services. Callers match them with
+// errors.Is to pick exit codes and user-facing messages.
 var (
-	// ErrNotFound: the ticker/ISIN is unknown to the provider.
-	ErrNotFound = errors.New("not found")
-
-	// ErrRateLimited: the provider rejected the call due to rate limits.
-	ErrRateLimited = errors.New("rate limited")
-
-	// ErrUnauthorized: the API key is missing, invalid, or lacks permission.
+	ErrNotFound     = errors.New("not found")
+	ErrRateLimited  = errors.New("rate limited")
 	ErrUnauthorized = errors.New("unauthorized")
-
-	// ErrUnavailable: the provider is temporarily unavailable (5xx, maintenance).
-	ErrUnavailable = errors.New("provider unavailable")
-
-	// ErrNetwork: connectivity failure (DNS, timeout, TLS).
-	ErrNetwork = errors.New("network error")
-
-	// ErrPartialData: the call succeeded but some expected fields are missing.
-	ErrPartialData = errors.New("partial data")
-
-	// ErrNoAPIKey: operation requires a configured API key.
-	ErrNoAPIKey = errors.New("api key not configured")
-
-	// ErrInvalidInput: user-provided input failed validation.
+	ErrUnavailable  = errors.New("provider unavailable")
+	ErrNetwork      = errors.New("network error")
+	ErrNoData       = errors.New("no data")
+	ErrNoAPIKey     = errors.New("api key not configured")
 	ErrInvalidInput = errors.New("invalid input")
-
-	// ErrCacheMiss: cache lookup miss (not an error per se, used by callers).
-	ErrCacheMiss = errors.New("cache miss")
 )
+
+// IsTransient reports whether err is worth retrying later or with another
+// provider (connectivity, rate limits, outages).
+func IsTransient(err error) bool {
+	return errors.Is(err, ErrNetwork) || errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRateLimited)
+}

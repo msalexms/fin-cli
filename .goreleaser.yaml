@@ -1,27 +1,32 @@
 version: 2
 
+project_name: fin-cli
+
 builds:
   - id: fin-cli
     main: ./cmd/fin-cli
     binary: fin-cli
-    goos:
-      - linux
-    goarch:
-      - amd64
-      - arm64
-      - arm
-    goarm:
-      - "7"
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: windows, goarch: arm }
     flags:
       - -trimpath
     ldflags:
-      - "-s -w -X fin-cli/internal/version.Version={{ .Version }} -X fin-cli/internal/version.Commit={{ .Commit }} -X fin-cli/internal/version.Date={{ .Date }}"
+      - "-s -w -X github.com/msalexms/fin-cli/internal/version.Version={{ .Version }} -X github.com/msalexms/fin-cli/internal/version.Commit={{ .ShortCommit }} -X github.com/msalexms/fin-cli/internal/version.Date={{ .Date }}"
     env:
       - CGO_ENABLED=0
 
 archives:
-  - format: tar.gz
-    name_template: "fin-cli_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - formats: [tar.gz]
+    # No version in the name so releases/latest/download/... links stay stable.
+    name_template: "fin-cli_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [README.md, LICENSE]
 
 checksum:
   name_template: "checksums.txt"
@@ -29,14 +34,44 @@ checksum:
 nfpms:
   - package_name: fin-cli
     file_name_template: "fin-cli_{{ .Version }}_{{ .Arch }}"
-    formats:
-      - deb
-      - rpm
-    vendor: "msalexms"
-    homepage: "https://github.com/msalexms/fin-cli"
-    maintainer: "Alejandro Martin <amstech04@gmail.com>"
-    description: "Minimalist terminal financial monitor with TUI dashboard"
+    formats: [deb, rpm]
+    vendor: "AMSTech"
+    homepage: "https://amstech.dev"
+    maintainer: "AMSTech <info@amstech.dev>"
+    description: "Terminal financial monitor: watchlist dashboard and one-shot quotes · [AMS] tech"
     license: "MIT"
 
 changelog:
   sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "^style:"
+      - "^test:"
+      - "^Merge "
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?:'
+      order: 0
+    - title: Fixes
+      regexp: '^fix(\(.+\))?:'
+      order: 1
+    - title: Other changes
+      order: 999
+
+release:
+  header: |
+    **fin-cli** — your market watchlist, right in the terminal.
+  footer: |
+    ### Install
+
+    ```bash
+    curl -sL https://github.com/msalexms/fin-cli/releases/latest/download/fin-cli_linux_amd64.tar.gz | tar xz
+    sudo install -m755 fin-cli /usr/local/bin/fin-cli
+    ```
+
+    [README](https://github.com/msalexms/fin-cli#readme) ·
+    [Changelog](https://github.com/msalexms/fin-cli/blob/main/CHANGELOG.md) ·
+    [amstech.dev](https://amstech.dev)

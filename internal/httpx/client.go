@@ -1,35 +1,38 @@
-// Package httpx provides a shared HTTP client with sane defaults: timeouts,
-// bounded retries for idempotent requests, and User-Agent injection.
+// Package httpx is the HTTP client shared by every provider: timeouts,
+// bounded retries for idempotent requests, a fixed User-Agent, and helpers
+// that turn transport failures and status codes into domain errors without
+// leaking request URLs (which may carry API keys) into messages.
 package httpx
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
 
-	"fin-cli/internal/version"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/version"
 )
+
+const maxAttempts = 3
 
 // Client wraps http.Client with retry logic for GET/HEAD requests.
 type Client struct {
-	http    *http.Client
-	retries int
-	ua      string
+	http *http.Client
+	ua   string
 }
 
-// New returns a Client with:
-//   - total request timeout: 10s
-//   - dial timeout: 3s
-//   - max 3 attempts on transient errors and 5xx for idempotent methods
+// New returns a Client with a 10s overall timeout per attempt.
 func New() *Client {
 	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   3 * time.Second,
+			Timeout:   5 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		TLSHandshakeTimeout:   5 * time.Second,
@@ -39,50 +42,46 @@ func New() *Client {
 		ForceAttemptHTTP2:     true,
 	}
 	return &Client{
-		http:    &http.Client{Transport: tr, Timeout: 10 * time.Second},
-		retries: 3,
-		ua:      version.UserAgent(),
+		http: &http.Client{Transport: tr, Timeout: 10 * time.Second},
+		ua:   version.UserAgent(),
 	}
 }
 
-// Do executes req with retries for idempotent methods (GET/HEAD) on transient
-// errors (network failures) and on 5xx responses. Non-idempotent methods are
-// executed exactly once.
+// Do executes req. Idempotent requests are retried with jittered backoff on
+// transport errors and 5xx responses. Transport errors are returned wrapped
+// in domain.ErrNetwork with the URL stripped.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	req.Header.Set("User-Agent", c.ua)
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", c.ua)
+	}
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "application/json")
 	}
 
-	idempotent := req.Method == http.MethodGet || req.Method == http.MethodHead
-
-	var lastErr error
 	attempts := 1
-	if idempotent {
-		attempts = c.retries
+	if req.Method == http.MethodGet || req.Method == http.MethodHead {
+		attempts = maxAttempts
 	}
 
-	for i := 0; i < attempts; i++ {
+	var lastErr error
+	for i := range attempts {
 		if i > 0 {
-			if err := sleepJitter(req.Context(), i); err != nil {
+			if err := backoff(req.Context(), i); err != nil {
 				return nil, err
 			}
 		}
-
 		resp, err := c.http.Do(req)
 		if err != nil {
-			if !shouldRetryErr(err) || !idempotent {
-				return nil, err
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				return nil, ctxErr
 			}
-			lastErr = err
+			lastErr = fmt.Errorf("%w: %v", domain.ErrNetwork, stripURL(err))
 			continue
 		}
-
-		if resp.StatusCode >= 500 && resp.StatusCode < 600 && idempotent && i < attempts-1 {
-			// Consume and close body to allow connection reuse, then retry.
+		if resp.StatusCode >= 500 && i < attempts-1 {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			lastErr = &HTTPError{StatusCode: resp.StatusCode}
+			lastErr = fmt.Errorf("%w: http %d", domain.ErrUnavailable, resp.StatusCode)
 			continue
 		}
 		return resp, nil
@@ -90,49 +89,70 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return nil, lastErr
 }
 
-// HTTPError describes a non-2xx response. Providers use it to classify errors.
-type HTTPError struct {
-	StatusCode int
-	Body       string // optional, populated by helpers that read the body
-}
-
-func (e *HTTPError) Error() string {
-	return http.StatusText(e.StatusCode)
-}
-
-// shouldRetryErr returns true for transient network/timeout errors.
-func shouldRetryErr(err error) bool {
-	if err == nil {
-		return false
+// GetJSON performs a GET and returns the body (capped at limit bytes) after
+// mapping non-2xx statuses to domain errors prefixed with provider.
+func (c *Client) GetJSON(ctx context.Context, provider, rawURL string, header http.Header, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", provider, stripURL(err))
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		if ue.Timeout() {
-			return true
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
 		}
 	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return true
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", provider, err)
 	}
-	// Treat any other non-context error as transient: io.EOF, reset, DNS.
-	return true
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w: read body: %v", provider, domain.ErrNetwork, stripURL(err))
+	}
+	if err := StatusError(provider, resp.StatusCode); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
-func sleepJitter(ctx context.Context, attempt int) error {
-	base := time.Duration(250*(1<<uint(attempt-1))) * time.Millisecond
-	if base > 2*time.Second {
-		base = 2 * time.Second
+// StatusError maps an HTTP status code to a domain error, or nil for 2xx.
+func StatusError(provider string, status int) error {
+	switch {
+	case status >= 200 && status < 300:
+		return nil
+	case status == http.StatusUnauthorized, status == http.StatusForbidden:
+		return fmt.Errorf("%s: %w (http %d)", provider, domain.ErrUnauthorized, status)
+	case status == http.StatusNotFound:
+		return fmt.Errorf("%s: %w", provider, domain.ErrNotFound)
+	case status == http.StatusTooManyRequests:
+		return fmt.Errorf("%s: %w", provider, domain.ErrRateLimited)
+	case status >= 500:
+		return fmt.Errorf("%s: %w (http %d)", provider, domain.ErrUnavailable, status)
+	default:
+		return fmt.Errorf("%s: unexpected http %d", provider, status)
 	}
-	jitter := time.Duration(rand.Int63n(int64(base / 2)))
-	d := base + jitter
+}
+
+// stripURL removes the request URL from *url.Error so query-string API keys
+// never reach logs or the screen.
+func stripURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
+}
+
+func backoff(ctx context.Context, attempt int) error {
+	base := min(time.Duration(250<<(attempt-1))*time.Millisecond, 2*time.Second)
+	d := base + rand.N(base/2)
+	t := time.NewTimer(d)
+	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(d):
+	case <-t.C:
 		return nil
 	}
 }

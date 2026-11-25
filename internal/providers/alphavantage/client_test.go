@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
 func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
@@ -23,7 +23,7 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
 func TestQuote_Success(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"Global Quote": {
 				"01. symbol": "IBM",
 				"02. open": "185.50",
@@ -58,7 +58,7 @@ func TestQuote_Success(t *testing.T) {
 	if q.ChangePct != 0.6757 {
 		t.Errorf("ChangePct = %f, want 0.6757", q.ChangePct)
 	}
-	if q.Source != domain.SourceAlphaVantage {
+	if q.Source != "alphavantage" {
 		t.Errorf("Source = %q, want alphavantage", q.Source)
 	}
 	if !q.Partial {
@@ -76,7 +76,7 @@ func TestQuote_NotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Alpha Vantage returns an empty Global Quote for unknown symbols.
-		w.Write([]byte(`{"Global Quote": {}}`))
+		_, _ = w.Write([]byte(`{"Global Quote": {}}`))
 	})
 
 	_, err := c.Quote(context.Background(), "ZZZZZZ")
@@ -91,7 +91,7 @@ func TestQuote_NotFound(t *testing.T) {
 func TestQuote_RateLimited_Note(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"Note": "Thank you for using Alpha Vantage! Our standard API call frequency is 25 calls per day."
 		}`))
 	})
@@ -108,7 +108,7 @@ func TestQuote_RateLimited_Note(t *testing.T) {
 func TestQuote_Unauthorized_Information(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"Information": "The provided API key is invalid or this is a premium endpoint."
 		}`))
 	})
@@ -163,7 +163,7 @@ func TestQuote_NoAPIKey(t *testing.T) {
 func TestHistory_Success(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"Meta Data": {
 				"2. Symbol": "IBM",
 				"3. Last Refreshed": "2024-01-05"
@@ -176,7 +176,7 @@ func TestHistory_Success(t *testing.T) {
 		}`))
 	})
 
-	candles, err := c.History(context.Background(), "IBM", domain.DefaultRange)
+	candles, err := c.History(context.Background(), "IBM", domain.HistorySessions)
 	if err != nil {
 		t.Fatalf("History() error: %v", err)
 	}
@@ -195,10 +195,10 @@ func TestHistory_Success(t *testing.T) {
 func TestHistory_RateLimited(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"Note": "rate limit exceeded"}`))
+		_, _ = w.Write([]byte(`{"Note": "rate limit exceeded"}`))
 	})
 
-	_, err := c.History(context.Background(), "IBM", domain.DefaultRange)
+	_, err := c.History(context.Background(), "IBM", domain.HistorySessions)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -209,11 +209,23 @@ func TestHistory_RateLimited(t *testing.T) {
 
 func TestHistory_NoAPIKey(t *testing.T) {
 	c := New(httpx.New(), "")
-	_, err := c.History(context.Background(), "IBM", domain.DefaultRange)
+	_, err := c.History(context.Background(), "IBM", domain.HistorySessions)
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if !errors.Is(err, domain.ErrNoAPIKey) {
 		t.Errorf("error = %v, want ErrNoAPIKey", err)
+	}
+}
+
+// The current daily-limit notice mentions "premium plans"; it must be treated
+// as a rate limit (transient) and not as a bad key (which would stop the chain).
+func TestQuote_DailyLimitIsRateLimit(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Information": "Thank you for using Alpha Vantage! Our standard API rate limit is 25 requests per day. Please subscribe to any of the premium plans to instantly remove all daily rate limits."}`))
+	})
+	_, err := c.Quote(context.Background(), "IBM")
+	if !errors.Is(err, domain.ErrRateLimited) {
+		t.Fatalf("error = %v, want ErrRateLimited", err)
 	}
 }

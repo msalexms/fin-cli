@@ -1,46 +1,69 @@
-// Package twelvedata implements domain.MarketProvider against the Twelve Data
-// REST API (https://twelvedata.com/docs).
-//
-// Free tier: 800 requests/day, 8 requests/minute.
-// Requires an API key from https://twelvedata.com.
+// Package twelvedata implements domain.Provider against the Twelve Data REST
+// API (https://twelvedata.com/docs). Free tier: 800 requests/day, 8/minute.
 package twelvedata
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"fin-cli/internal/domain"
-	"fin-cli/internal/httpx"
+	"github.com/msalexms/fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/httpx"
 )
 
-const baseURL = "https://api.twelvedata.com"
+const (
+	name    = "twelvedata"
+	baseURL = "https://api.twelvedata.com"
+)
 
-// Client implements domain.MarketProvider.
+// Client implements domain.Provider.
 type Client struct {
 	http   *httpx.Client
 	apiKey string
 	base   string
 }
 
-// New returns a Client. If apiKey is empty, all calls return ErrNoAPIKey.
+// New returns a Client. With an empty apiKey every call fails with ErrNoAPIKey.
 func New(h *httpx.Client, apiKey string) *Client {
 	return &Client{http: h, apiKey: apiKey, base: baseURL}
 }
 
-// Name satisfies domain.MarketProvider.
-func (c *Client) Name() string { return "twelvedata" }
+// Name implements domain.Provider.
+func (c *Client) Name() string { return name }
 
-// --- Quote ---
+// apiError is embedded in every response; Twelve Data reports errors with
+// HTTP 200 and status "error".
+type apiError struct {
+	Status  string `json:"status"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e apiError) err(sym domain.Ticker) error {
+	if e.Status != "error" {
+		return nil
+	}
+	msg := strings.ToLower(e.Message)
+	switch {
+	case e.Code == 401 || e.Code == 403 || strings.Contains(msg, "api key"):
+		return fmt.Errorf("%s: %w: %s", name, domain.ErrUnauthorized, e.Message)
+	case e.Code == 429 || strings.Contains(msg, "credits"):
+		return fmt.Errorf("%s: %w", name, domain.ErrRateLimited)
+	case e.Code == 404 || strings.Contains(msg, "not found"):
+		return fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
+	case strings.Contains(msg, "no data"):
+		return fmt.Errorf("%s: %w: %s", name, domain.ErrNoData, sym)
+	default:
+		return fmt.Errorf("%s: error %d: %s", name, e.Code, e.Message)
+	}
+}
 
 type quoteResponse struct {
-	Symbol        string `json:"symbol"`
+	apiError
 	Name          string `json:"name"`
 	Exchange      string `json:"exchange"`
 	Currency      string `json:"currency"`
@@ -52,234 +75,130 @@ type quoteResponse struct {
 	Change        string `json:"change"`
 	PercentChange string `json:"percent_change"`
 	Volume        string `json:"volume"`
-	FiftyTwoWkH  string `json:"fifty_two_week_high"`
-	FiftyTwoWkL  string `json:"fifty_two_week_low"`
+	AverageVolume string `json:"average_volume"`
 	Timestamp     int64  `json:"timestamp"`
-
-	// Error fields (returned on error instead of data).
-	Status  string `json:"status"`
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	IsMarketOpen  *bool  `json:"is_market_open"`
+	FiftyTwoWeek  struct {
+		Low  string `json:"low"`
+		High string `json:"high"`
+	} `json:"fifty_two_week"`
 }
 
-// Quote fetches a real-time quote from Twelve Data.
+// Quote implements domain.Provider.
 func (c *Client) Quote(ctx context.Context, sym domain.Ticker) (domain.Quote, error) {
-	if c.apiKey == "" {
-		return domain.Quote{}, fmt.Errorf("%w: twelvedata requires an API key (set twelvedata.api_key in config)", domain.ErrNoAPIKey)
-	}
-
-	u := fmt.Sprintf("%s/quote?%s", c.base, url.Values{
-		"symbol": {strings.ToUpper(string(sym))},
-		"apikey": {c.apiKey},
-	}.Encode())
-
-	body, err := c.doGet(ctx, u)
-	if err != nil {
+	var r quoteResponse
+	if err := c.get(ctx, "/quote", url.Values{"symbol": {string(sym)}}, &r); err != nil {
 		return domain.Quote{}, err
 	}
-
-	var resp quoteResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return domain.Quote{}, fmt.Errorf("decode twelvedata: %w", err)
+	if err := r.err(sym); err != nil {
+		return domain.Quote{}, err
+	}
+	price := num(r.Close)
+	if price == 0 {
+		return domain.Quote{}, fmt.Errorf("%s: %w: %s", name, domain.ErrNotFound, sym)
 	}
 
-	if resp.Status == "error" {
-		return domain.Quote{}, classifyError(resp.Code, resp.Message, sym)
-	}
-
-	price := parseFloat(resp.Close)
-	prevClose := parseFloat(resp.PreviousClose)
-	change := parseFloat(resp.Change)
-	changePct := parseFloat(resp.PercentChange)
-
-	if price == 0 && prevClose == 0 {
-		return domain.Quote{}, fmt.Errorf("%w: %s (all zeros)", domain.ErrNotFound, sym)
-	}
-
+	now := time.Now().UTC()
 	q := domain.Quote{
 		Symbol:    sym,
-		Name:      resp.Name,
-		Currency:  resp.Currency,
-		Exchange:  resp.Exchange,
+		Name:      r.Name,
+		Currency:  r.Currency,
+		Exchange:  r.Exchange,
 		Price:     price,
-		PrevClose: prevClose,
-		Change:    change,
-		ChangePct: changePct,
-		Source:    domain.SourceTwelveData,
-		FetchedAt: time.Now().UTC(),
-		Partial:   true, // no P/E, EPS, Beta, Div Yield from /quote
+		PrevClose: num(r.PreviousClose),
+		Change:    num(r.Change),
+		ChangePct: num(r.PercentChange),
+		AsOf:      now,
+		FetchedAt: now,
+		Source:    name,
+		Partial:   true, // no fundamentals on /quote
 	}
-
-	if v := parseFloat(resp.Open); v > 0 {
-		q.Open = domain.Some(v)
+	if r.Timestamp > 0 {
+		q.AsOf = time.Unix(r.Timestamp, 0).UTC()
 	}
-	if v := parseFloat(resp.High); v > 0 {
-		q.DayHigh = domain.Some(v)
+	if r.IsMarketOpen != nil {
+		q.Session = domain.SessionClosed
+		if *r.IsMarketOpen {
+			q.Session = domain.SessionRegular
+		}
 	}
-	if v := parseFloat(resp.Low); v > 0 {
-		q.DayLow = domain.Some(v)
-	}
-	if v := parseInt(resp.Volume); v > 0 {
+	setPositive(&q.Open, num(r.Open))
+	setPositive(&q.DayHigh, num(r.High))
+	setPositive(&q.DayLow, num(r.Low))
+	setPositive(&q.Week52High, num(r.FiftyTwoWeek.High))
+	setPositive(&q.Week52Low, num(r.FiftyTwoWeek.Low))
+	if v := int64(num(r.Volume)); v > 0 {
 		q.Volume = domain.Some(v)
 	}
-	if v := parseFloat(resp.FiftyTwoWkH); v > 0 {
-		q.Week52High = domain.Some(v)
+	if v := int64(num(r.AverageVolume)); v > 0 {
+		q.AvgVolume = domain.Some(v)
 	}
-	if v := parseFloat(resp.FiftyTwoWkL); v > 0 {
-		q.Week52Low = domain.Some(v)
-	}
-	if resp.Timestamp > 0 {
-		q.AsOf = time.Unix(resp.Timestamp, 0).UTC()
-	}
-
 	return q, nil
 }
 
-// --- History ---
-
-type timeSeriesResponse struct {
-	Meta   tsMeta    `json:"meta"`
-	Values []tsValue `json:"values"`
-
-	// Error fields.
-	Status  string `json:"status"`
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+type seriesResponse struct {
+	apiError
+	Values []struct {
+		Datetime string `json:"datetime"`
+		Open     string `json:"open"`
+		High     string `json:"high"`
+		Low      string `json:"low"`
+		Close    string `json:"close"`
+		Volume   string `json:"volume"`
+	} `json:"values"`
 }
 
-type tsMeta struct {
-	Symbol   string `json:"symbol"`
-	Interval string `json:"interval"`
-	Currency string `json:"currency"`
-	Exchange string `json:"exchange"`
-}
-
-type tsValue struct {
-	Datetime string `json:"datetime"`
-	Open     string `json:"open"`
-	High     string `json:"high"`
-	Low      string `json:"low"`
-	Close    string `json:"close"`
-	Volume   string `json:"volume"`
-}
-
-// History fetches daily OHLCV candles from Twelve Data.
-func (c *Client) History(ctx context.Context, sym domain.Ticker, r domain.Range) ([]domain.Candle, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("%w: twelvedata requires an API key", domain.ErrNoAPIKey)
-	}
-
-	sessions := r.Sessions
-	if sessions <= 0 {
-		sessions = 22
-	}
-
-	u := fmt.Sprintf("%s/time_series?%s", c.base, url.Values{
-		"symbol":     {strings.ToUpper(string(sym))},
-		"interval":   {"1day"},
-		"outputsize": {strconv.Itoa(sessions)},
-		"apikey":     {c.apiKey},
-	}.Encode())
-
-	body, err := c.doGet(ctx, u)
-	if err != nil {
+// History implements domain.Provider.
+func (c *Client) History(ctx context.Context, sym domain.Ticker, sessions int) ([]domain.Candle, error) {
+	var r seriesResponse
+	q := url.Values{"symbol": {string(sym)}, "interval": {"1day"}, "outputsize": {strconv.Itoa(sessions)}}
+	if err := c.get(ctx, "/time_series", q, &r); err != nil {
 		return nil, err
 	}
-
-	var resp timeSeriesResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode twelvedata: %w", err)
+	if err := r.err(sym); err != nil {
+		return nil, err
 	}
-
-	if resp.Status == "error" {
-		return nil, classifyError(resp.Code, resp.Message, sym)
-	}
-
-	if len(resp.Values) == 0 {
-		return nil, fmt.Errorf("%w: no candles", domain.ErrPartialData)
-	}
-
-	// Twelve Data returns newest first; reverse for chronological order.
-	candles := make([]domain.Candle, 0, len(resp.Values))
-	for i := len(resp.Values) - 1; i >= 0; i-- {
-		v := resp.Values[i]
-		t, _ := time.Parse("2006-01-02", v.Datetime)
-		cl := parseFloat(v.Close)
-		if cl == 0 {
+	// Values come newest first.
+	out := make([]domain.Candle, 0, len(r.Values))
+	for i := len(r.Values) - 1; i >= 0; i-- {
+		v := r.Values[i]
+		t, err := time.Parse("2006-01-02", v.Datetime)
+		if err != nil || num(v.Close) == 0 {
 			continue
 		}
-		candles = append(candles, domain.Candle{
-			Time:   t,
-			Open:   parseFloat(v.Open),
-			High:   parseFloat(v.High),
-			Low:    parseFloat(v.Low),
-			Close:  cl,
-			Volume: parseInt(v.Volume),
+		out = append(out, domain.Candle{
+			Time: t, Open: num(v.Open), High: num(v.High), Low: num(v.Low),
+			Close: num(v.Close), Volume: int64(num(v.Volume)),
 		})
 	}
-
-	if len(candles) == 0 {
-		return nil, fmt.Errorf("%w: empty candles", domain.ErrPartialData)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s: %w: empty series", name, domain.ErrNoData)
 	}
-	return candles, nil
+	return out, nil
 }
 
-// --- HTTP helpers ---
-
-func (c *Client) doGet(ctx context.Context, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
+	if c.apiKey == "" {
+		return fmt.Errorf("%s: %w", name, domain.ErrNoAPIKey)
+	}
+	q.Set("apikey", c.apiKey)
+	body, err := c.http.GetJSON(ctx, name, c.base+path+"?"+q.Encode(), nil, 1<<20)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", domain.ErrNetwork, err)
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("%s: decode %s: %w", name, path, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("%w: twelvedata", domain.ErrRateLimited)
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("%w: twelvedata", domain.ErrUnauthorized)
-	}
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("%w: twelvedata http %d", domain.ErrUnavailable, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max
-	if err != nil {
-		return nil, fmt.Errorf("%w: read body: %v", domain.ErrNetwork, err)
-	}
-	return body, nil
+	return nil
 }
 
-func classifyError(code int, msg string, sym domain.Ticker) error {
-	lower := strings.ToLower(msg)
-	switch {
-	case code == 401:
-		return fmt.Errorf("%w: twelvedata: %s", domain.ErrUnauthorized, msg)
-	case code == 429:
-		return fmt.Errorf("%w: twelvedata", domain.ErrRateLimited)
-	case strings.Contains(lower, "not found") || strings.Contains(lower, "symbol not found"):
-		return fmt.Errorf("%w: %s", domain.ErrNotFound, sym)
-	case strings.Contains(lower, "no data"):
-		return fmt.Errorf("%w: %s", domain.ErrPartialData, sym)
-	default:
-		return fmt.Errorf("twelvedata error %d: %s", code, msg)
-	}
-}
-
-// --- parsing helpers ---
-
-func parseFloat(s string) float64 {
+func num(s string) float64 {
 	v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	return v
 }
 
-func parseInt(s string) int64 {
-	v, _ := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
-	return v
+func setPositive(dst *domain.Optional[float64], v float64) {
+	if v > 0 {
+		*dst = domain.Some(v)
+	}
 }

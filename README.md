@@ -1,252 +1,211 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="fin-cli banner" width="100%"/>
+  <img src="assets/banner.svg" alt="fin-cli — An AMSTech project. Terminal financial monitor: live watchlist dashboard, one-shot quotes and charts, works without API keys." width="920">
 </p>
 
 <p align="center">
-  <strong>Linux terminal financial monitor</strong> — watchlist dashboard + one-shot quotes.
+  <a href="https://github.com/msalexms/fin-cli/releases"><img src="https://img.shields.io/github/v/release/msalexms/fin-cli?style=flat-square&color=2B36D9" alt="Release"></a>
+  <a href="https://github.com/msalexms/fin-cli/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/msalexms/fin-cli/ci.yml?branch=main&style=flat-square&label=CI&color=2B36D9" alt="CI"></a>
+  <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25-2B36D9?style=flat-square&logo=go&logoColor=white" alt="Go 1.25"></a>
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-1E1B2E?style=flat-square" alt="Linux, macOS and Windows">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-FFE27A?style=flat-square&labelColor=1E1B2E" alt="MIT License"></a>
 </p>
 
 <p align="center">
+  <strong>English</strong> · <a href="README.es.md">Español</a>
+</p>
+
+<p align="center">
+  <a href="#whats-new">What's new</a> ·
   <a href="#features">Features</a> ·
   <a href="#install">Install</a> ·
   <a href="#usage">Usage</a> ·
-  <a href="#configuration">Configuration</a> ·
+  <a href="#keyboard">Keyboard</a> ·
   <a href="#providers">Providers</a> ·
-  <a href="#keybindings">Keybindings</a> ·
-  <a href="#build-from-source">Build</a>
+  <a href="#configuration">Configuration</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  <img src="fin-cli-demo.gif" alt="fin-cli demo" width="100%"/>
+  <img src="assets/demo.gif" alt="fin-cli dashboard: watchlist with sparklines, detail pane with stats and a one-month chart, sorting, adding a ticker, help and settings" width="900">
+  <br>
+  <em>Live quotes and charts, sort by daily change, add a ticker, and change settings without restarting.</em>
 </p>
+
+---
+
+## What's new
+
+**v0.2.0 — AMSTech brand, rebuilt core, works without keys.**
+
+- **Works out of the box** — Yahoo Finance serves quotes and charts with no API key; Finnhub, Twelve Data and Alpha Vantage add fundamentals and fallbacks when you configure them.
+- **AMSTech look** — the dashboard and `quote` output use the AMSTech palette (brand indigo, Thor, soft signal colors) and keep your terminal background.
+- **Redesigned dashboard** — help screen (`?`), remove confirmation, manual reordering, persistent sort order, sparklines, adaptive layout down to 44×12.
+- **Settings that apply instantly** — API keys, providers and the refresh interval are validated and take effect without restarting.
+- **Accurate data** — correct daily change on Yahoo, international tickers (`SAN.MC`, `VOD.L`) no longer blocked by Finnhub, and dozens of other fixes. See the [changelog](CHANGELOG.md).
 
 ---
 
 ## Features
 
-- **Interactive TUI dashboard** — watchlist sidebar with sparklines, detail pane with price/change/stats, and 30-session ASCII chart
-- **One-shot CLI** — `fin-cli quote AAPL` prints a neofetch-style snapshot to stdout
-- **Multi-provider fallback** — Finnhub → Yahoo → Twelve Data → Alpha Vantage, with automatic failover on transient errors
-- **Disk cache + singleflight** — fast starts, no duplicate network calls, graceful fallback on errors
-- **ISIN resolution** — pass an ISIN (`fin-cli quote US0378331005`) and it resolves to a ticker automatically
-- **Interactive settings panel** — edit API keys, polling interval, and provider chains from inside the TUI (`c` key)
-- **XDG-compliant** — config, cache, and data follow `~/.config`, `~/.cache`, `~/.local/share`
-- **Zero CGO** — static binary, ~9 MB stripped, no runtime dependencies
-- **Locale-aware** — autodetects `LC_*`/`LANG` for number formatting; ASCII fallback on `LANG=C`
+- **Interactive dashboard** — watchlist with 10-session sparklines and daily change, and a detail pane with price, stats and a one-month chart.
+- **One-shot quotes** — `fin-cli quote AAPL` prints a snapshot with a chart; `--format json` for scripts.
+- **Stocks, ETFs, indices, crypto and FX** — anything Yahoo Finance lists: `AAPL`, `SAN.MC`, `^GSPC`, `BTC-USD`, `EURUSD=X`.
+- **ISIN support** — `fin-cli add US0378331005` resolves the ISIN through OpenFIGI.
+- **Provider fallback** — quotes are tried provider by provider; when all fail, the last cached quote is shown and marked *offline*.
+- **Scriptable** — `export` to CSV/JSON, `config get/set`, meaningful exit codes.
+- **Single static binary** — Go 1.25, no CGO, no runtime dependencies. Linux, macOS and Windows.
+
+---
 
 ## Install
 
-### Pre-built binary
-
-Download the latest release from [Releases](https://github.com/msalexms/fin-cli/releases):
-
 ```bash
-curl -sL https://github.com/msalexms/fin-cli/releases/latest/download/fin-cli_linux_amd64.tar.gz | tar xz -C /usr/local/bin fin-cli
+# Linux binary (swap amd64 for arm64 or armv7)
+curl -sL https://github.com/msalexms/fin-cli/releases/latest/download/fin-cli_linux_amd64.tar.gz | tar xz
+sudo install -m755 fin-cli /usr/local/bin/fin-cli
+
+# .deb / .rpm packages and macOS / Windows archives are on the releases page.
+
+# With Go 1.25+
+go install github.com/msalexms/fin-cli/cmd/fin-cli@latest
 ```
 
-### Go install
-
-```bash
-go install fin-cli/cmd/fin-cli@latest
-```
-
-### Build from source
-
-See [Build from source](#build-from-source) below.
+---
 
 ## Usage
 
-### TUI (interactive dashboard)
+```bash
+fin-cli                          # open the dashboard
+```
+
+The first run creates a documented `config.toml` and an empty watchlist. Press `a` to add tickers.
+
+### Commands
 
 ```bash
-fin-cli
+fin-cli quote AAPL               # snapshot with a one-month chart
+fin-cli quote US0378331005       # ISINs are detected automatically
+fin-cli quote BTC-USD -f json    # JSON for scripts (--no-chart skips history)
+
+fin-cli add AAPL MSFT SAN.MC     # validated online; --no-validate when offline
+fin-cli remove MSFT              # alias: rm
+fin-cli list                     # -f json for JSON
+
+fin-cli export                   # CSV to stdout
+fin-cli export -f json -o quotes.json
+
+fin-cli config list              # every setting (keys masked)
+fin-cli config set finnhub.api_key <KEY>
+fin-cli config set polling_interval 2m
+fin-cli config edit              # open config.toml in $EDITOR
+fin-cli config path              # where files live
+
+fin-cli purge                    # clear the cache
+fin-cli --version
 ```
 
-Opens a full-screen dashboard with your watchlist on the left and instrument detail on the right. Polls every 5 minutes by default.
+Global flags: `--config`, `--watchlist`, `--debug` (writes a log with API keys redacted) and `--finnhub-key`, `--twelvedata-key`, `--alphavantage-key`, `--openfigi-key` for one-off overrides.
 
-### One-shot quote
+### Exit codes
 
-```bash
-fin-cli quote AAPL
-fin-cli quote US0378331005        # ISIN autodetected
-fin-cli quote --isin <ISIN>       # explicit ISIN
-fin-cli quote --format=json AAPL  # JSON output
-```
+| Code | Meaning |
+| --- | --- |
+| 0 | OK |
+| 1 | Unexpected error |
+| 2 | Invalid input or usage |
+| 3 | Network error, provider down or rate limited |
+| 4 | Missing or rejected API key |
+| 5 | Ticker not found |
 
-### Watchlist management
+---
 
-```bash
-fin-cli add AAPL                  # validate + persist
-fin-cli add AAPL --no-validate    # skip online check (offline)
-fin-cli remove AAPL               # drop from watchlist
-fin-cli list                      # print watchlist
-fin-cli list --format=json        # JSON output
-```
+## Keyboard
 
-### Configuration
+| Key | Action |
+| --- | --- |
+| `↑` `↓` · `k` `j` | Select previous / next |
+| `g` · `G` | First / last |
+| `K` `J` · `Shift`+`↑` `↓` | Move the ticker up / down (manual order) |
+| `a` | Add a ticker or ISIN |
+| `d` | Remove the selected ticker (asks for confirmation) |
+| `r` · `R` | Refresh selected / all now |
+| `s` | Cycle order: manual, % change ↓, % change ↑, symbol, volume (remembered) |
+| `c` | Settings: API keys, providers, refresh interval, order |
+| `?` | Help |
+| `q` · `Ctrl`+`C` | Quit |
 
-```bash
-fin-cli config set finnhub.api_key YOUR_KEY
-fin-cli config get finnhub.api_key    # redacted: ****last4
-fin-cli config edit                   # open $EDITOR
-fin-cli config path                   # print config path
-```
+The header shows when data was last updated; quotes refresh automatically at the configured interval (5 minutes by default). In the detail pane, *partial data* means the source has no fundamentals and *offline* means every provider failed and the last cached quote is shown.
 
-### Other
-
-```bash
-fin-cli purge                         # clear disk caches
-fin-cli export --format=csv           # export watchlist quotes
-fin-cli export --format=json -o out.json
-fin-cli --debug quote AAPL            # enable debug logging
-```
-
-## Configuration
-
-First run writes a commented template to `~/.config/fin-cli/config.toml`.
-
-```toml
-schema_version = 2
-polling_interval = "5m"
-providers = ["finnhub", "yahoo"]
-history_providers = ["yahoo"]
-
-[finnhub]
-api_key = ""                # env: FIN_CLI_FINNHUB_KEY
-
-[openfigi]
-api_key = ""                # env: FIN_CLI_OPENFIGI_KEY
-
-[twelvedata]
-api_key = ""                # env: FIN_CLI_TWELVEDATA_KEY
-
-[alphavantage]
-api_key = ""                # env: FIN_CLI_ALPHAVANTAGE_KEY
-
-[ui]
-sort_mode = ""              # "manual" | "%desc" | "%asc" | "alpha" | "volume"
-```
-
-**Key precedence** (highest first): CLI flag → env var → config file.
+---
 
 ## Providers
 
-| Provider | Role | Notes |
-|---|---|---|
-| **Finnhub** | Quote + fundamentals | Primary provider; no candles on free tier |
-| **Yahoo** | History (chart) + quote fallback | Unofficial; best-effort; partial data as quote fallback |
-| **Twelve Data** | Quote + History | Partial quotes; requires free API key |
-| **Alpha Vantage** | Quote + History | Last-resort fallback; harsh daily limit |
-| **OpenFIGI** | ISIN resolution | No key needed; higher limit with key |
+| Provider | Key | Quotes | Chart | Notes |
+| --- | --- | --- | --- | --- |
+| **Yahoo Finance** | No | ✓ | ✓ | Global coverage, crypto and FX. Unofficial endpoint. |
+| **Finnhub** | [Free](https://finnhub.io) | ✓ | — | Adds P/E, EPS, beta, dividend yield and market cap. Mostly US on the free tier. |
+| **Twelve Data** | [Free](https://twelvedata.com) | ✓ | ✓ | 800 requests/day. |
+| **Alpha Vantage** | [Free](https://www.alphavantage.co/support/#api-key) | ✓ | ✓ | 25 requests/day: last-resort fallback. |
+| **OpenFIGI** | Optional | — | — | ISIN → ticker. 25 req/min without key, 250 with one. |
 
-Provider chains are configurable. Transient errors (network, rate limit, 5xx) advance to the next provider. Terminal errors (not found, bad key) stop the chain.
+The default quote chain is `finnhub, yahoo`: Finnhub is skipped until it has a key, so Yahoo answers out of the box. Every failure moves on to the next provider, so a ticker Finnhub does not cover is still served by Yahoo. Non-US tickers use Yahoo suffixes: `SAN.MC` (Madrid), `VOD.L` (London), `SAP.DE` (Xetra), `7203.T` (Tokyo).
 
-## Keybindings
+---
 
-### List mode
+## Configuration
 
-| Key | Action |
-|---|---|
-| `↑` / `k` | Previous ticker |
-| `↓` / `j` | Next ticker |
-| `r` | Force-refresh selected |
-| `a` | Add ticker (opens input) |
-| `d` | Delete selected |
-| `s` | Cycle sort mode |
-| `c` | Open settings panel |
-| `q` / `Ctrl+C` | Quit |
+`config.toml` is created on first run with every option documented, and keeps its comments when changed from the CLI or the settings panel.
 
-### Settings panel
+```toml
+polling_interval = "5m"                                     # min 30s
+providers = ["finnhub", "yahoo"]                            # quote chain, in order
+history_providers = ["yahoo", "twelvedata", "alphavantage"] # chart chain
 
-| Key | Action |
-|---|---|
-| `↑` / `↓` | Navigate fields |
-| `Enter` | Edit selected field |
-| `Enter` (editing) | Save value |
-| `Esc` | Cancel edit / exit panel |
+[finnhub]
+api_key = ""            # or FIN_CLI_FINNHUB_KEY
 
-### Add input
+[ui]
+sort_mode = "manual"    # manual | change_desc | change_asc | alpha | volume
+```
 
-| Key | Action |
-|---|---|
-| `Enter` | Validate + persist |
-| `Esc` | Cancel |
+API keys are resolved in this order: command-line flag → environment variable (`FIN_CLI_FINNHUB_KEY`, `FIN_CLI_TWELVEDATA_KEY`, `FIN_CLI_ALPHAVANTAGE_KEY`, `FIN_CLI_OPENFIGI_KEY`) → `config.toml`.
 
-## XDG Layout
+| File | Linux / BSD | macOS / Windows |
+| --- | --- | --- |
+| Config and watchlist | `$XDG_CONFIG_HOME/fin-cli/` (`~/.config/fin-cli/`) | user config dir (`~/Library/Application Support`, `%AppData%`) |
+| Cache | `$XDG_CACHE_HOME/fin-cli/` (`~/.cache/fin-cli/`) | user cache dir |
+| Debug log | `$XDG_STATE_HOME/fin-cli/fin-cli.log` | user config dir |
 
-| Path | Purpose |
-|---|---|
-| `~/.config/fin-cli/config.toml` | API keys, polling interval (perms `0600`) |
-| `~/.config/fin-cli/watchlist.toml` | Watchlist tickers (perms `0600`) |
-| `~/.cache/fin-cli/quotes/<TICKER>.json` | Per-ticker quote cache |
-| `~/.cache/fin-cli/isin/<ISIN>.json` | ISIN resolution cache (30-day TTL) |
-| `~/.local/share/fin-cli/fin-cli.log` | Debug log (only with `--debug`) |
+`fin-cli config path` prints the exact locations. Files are written atomically with `0600` permissions and a lock, so the dashboard and the CLI can run at the same time.
 
-All writes are atomic (tmp + rename) with advisory `flock` to prevent corruption from concurrent instances.
+---
 
-## Build from source
-
-### Requirements
-
-- Go 1.23+
-- Linux (target platform)
-
-### Production build
+## Development
 
 ```bash
-CGO_ENABLED=0 go build -trimpath \
-  -ldflags='-s -w -X fin-cli/internal/version.Version=0.1.0' \
-  -o fin-cli ./cmd/fin-cli
+make test     # go test ./... -race
+make lint     # go vet + staticcheck
+make build    # bin/fin-cli with version info
 ```
 
-### Dev previews
-
-```bash
-go run -tags preview ./scripts/preview         # CLI one-shot render
-go run -tags preview ./scripts/preview-tui     # TUI snapshot
-```
-
-### Run tests
-
-```bash
-go test ./...
-go vet ./...
-```
-
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | OK |
-| 1 | Generic error |
-| 2 | Usage / invalid input |
-| 3 | Network / provider unavailable |
-| 4 | Config / auth |
-| 5 | Ticker not found |
-
-## Project structure
+Project layout:
 
 ```
-cmd/fin-cli/main.go                     # Cobra root
+cmd/fin-cli/        entry point
 internal/
-  domain/        types, errors, ports
-  providers/     finnhub, yahoo, twelvedata, alphavantage, openfigi
-  quotes/        QuoteService (cache + singleflight + chain)
-  isin/          ISIN resolver
-  watchlist/     Watchlist store
-  config/        XDG paths, TOML loader, atomic IO
-  cache/         Disk cache
-  format/        Shared formatting helpers
-  chart/         Chart renderers (blocks, ascii)
-  tui/           Bubbletea app (model, update, view, settings, sidebar, detail...)
-  cli/           Subcommands + one-shot renderer
-  httpx/         Shared HTTP client
-  throttle/      Rate limiter
-  locale/        Locale autodetect
-  logging/       slog + key redactor
-  version/       Build-time metadata
+  app/              wiring: config → providers → services (live reconfiguration)
+  cli/              cobra commands and the quote renderer
+  tui/              Bubble Tea dashboard
+  quotes/           provider chains, cache, stale fallback, rate limit
+  providers/        yahoo, finnhub, twelvedata, alphavantage, openfigi
+  domain/           types, errors and ports (no dependencies)
+  config/ watchlist/ cache/ fsutil/ httpx/ isin/ format/ chart/ theme/ locale/ logging/ version/
 ```
 
-## License
+Releases are built by GoReleaser from a `v*` tag.
 
-MIT License. See [LICENSE](LICENSE).
+---
+
+<p align="center">
+  <sub>Built for me, shared with all · an <a href="https://amstech.dev">AMSTech</a> project · MIT License</sub>
+</p>

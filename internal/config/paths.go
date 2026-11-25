@@ -1,63 +1,56 @@
-// Package config exposes XDG Base Directory aware paths for fin-cli.
 package config
 
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 const appName = "fin-cli"
 
-// Paths holds all directories and files fin-cli reads/writes.
+// Paths holds every file and directory fin-cli reads or writes.
 type Paths struct {
-	ConfigDir    string
-	CacheDir     string
-	DataDir      string
-	ConfigFile   string // <ConfigDir>/config.toml
-	WatchlistDir string // <ConfigDir>
-	Watchlist    string // <ConfigDir>/watchlist.toml
-	QuoteCache   string // <CacheDir>/quotes
-	ISINCache    string // <CacheDir>/isin
-	LogFile      string // <DataDir>/fin-cli.log
+	ConfigFile string
+	Watchlist  string
+	QuoteCache string
+	ISINCache  string
+	LogFile    string
 }
 
-// DefaultPaths returns paths derived from XDG_* environment variables
-// with fallbacks to ~/.config, ~/.cache, ~/.local/share.
+// DefaultPaths follows the XDG Base Directory spec ($XDG_CONFIG_HOME,
+// $XDG_CACHE_HOME, $XDG_STATE_HOME) on Linux and BSD, and the native
+// per-user directories elsewhere unless XDG variables are set.
 func DefaultPaths() (Paths, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Paths{}, err
 	}
-	cfgBase := envOr("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	cacheBase := envOr("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	dataBase := envOr("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
-
-	p := Paths{
-		ConfigDir:    filepath.Join(cfgBase, appName),
-		CacheDir:     filepath.Join(cacheBase, appName),
-		DataDir:      filepath.Join(dataBase, appName),
-	}
-	p.ConfigFile = filepath.Join(p.ConfigDir, "config.toml")
-	p.WatchlistDir = p.ConfigDir
-	p.Watchlist = filepath.Join(p.ConfigDir, "watchlist.toml")
-	p.QuoteCache = filepath.Join(p.CacheDir, "quotes")
-	p.ISINCache = filepath.Join(p.CacheDir, "isin")
-	p.LogFile = filepath.Join(p.DataDir, "fin-cli.log")
-	return p, nil
-}
-
-// EnsureDirs creates the needed directories with 0700 perms (idempotent).
-func (p Paths) EnsureDirs() error {
-	for _, d := range []string{p.ConfigDir, p.CacheDir, p.DataDir, p.QuoteCache, p.ISINCache} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			return err
+	cfgBase := filepath.Join(home, ".config")
+	cacheBase := filepath.Join(home, ".cache")
+	stateBase := filepath.Join(home, ".local", "state")
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		if d, err := os.UserConfigDir(); err == nil {
+			cfgBase, stateBase = d, d
+		}
+		if d, err := os.UserCacheDir(); err == nil {
+			cacheBase = d
 		}
 	}
-	return nil
+	cfgDir := filepath.Join(envOr("XDG_CONFIG_HOME", cfgBase), appName)
+	cacheDir := filepath.Join(envOr("XDG_CACHE_HOME", cacheBase), appName)
+	stateDir := filepath.Join(envOr("XDG_STATE_HOME", stateBase), appName)
+
+	return Paths{
+		ConfigFile: filepath.Join(cfgDir, "config.toml"),
+		Watchlist:  filepath.Join(cfgDir, "watchlist.toml"),
+		QuoteCache: filepath.Join(cacheDir, "quotes"),
+		ISINCache:  filepath.Join(cacheDir, "isin"),
+		LogFile:    filepath.Join(stateDir, "fin-cli.log"),
+	}, nil
 }
 
 func envOr(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return fallback

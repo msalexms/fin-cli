@@ -1,5 +1,7 @@
 # Compiled binary
-fin-cli
+/fin-cli
+/fin-cli.exe
+bin/
 
 # Build artifacts
 *.tar.gz

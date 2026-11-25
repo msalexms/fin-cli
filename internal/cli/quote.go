@@ -3,98 +3,72 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"strings"
+	"io"
 
 	"github.com/spf13/cobra"
 
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/app"
+	"github.com/msalexms/fin-cli/internal/domain"
 )
 
-// NewQuoteCmd returns `fin-cli quote [ticker|isin]`.
-func NewQuoteCmd(appFactory func() (*App, error)) *cobra.Command {
+func newQuoteCmd(withApp appRunner) *cobra.Command {
 	var (
-		isISIN  bool
-		format  string
+		forceISIN bool
+		format    string
+		noChart   bool
 	)
 	cmd := &cobra.Command{
-		Use:   "quote [ticker]",
-		Short: "Print a one-shot quote snapshot",
-		Long: `Fetch a quote and render a neofetch-like snapshot with a 30-session chart.
+		Use:   "quote <ticker|isin>",
+		Short: "Print a quote snapshot with a one-month chart",
+		Long: `Fetch a quote and print a snapshot: price, change, key stats and a chart of
+the last ~22 sessions.
 
-The argument is treated as a ticker symbol. If it matches the ISIN format
-(e.g. US0378331005), or --isin is given, it is resolved to a ticker via OpenFIGI first.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := appFactory()
+Tickers use Yahoo-style suffixes for non-US markets (SAN.MC, VOD.L, 7203.T),
+crypto and FX pairs (BTC-USD, EURUSD=X) and indices (^GSPC). ISINs such as
+US0378331005 are detected automatically and resolved through OpenFIGI.`,
+		Example: `  fin-cli quote AAPL
+  fin-cli quote US0378331005
+  fin-cli quote BTC-USD --format json`,
+		Args: usageArgs(cobra.ExactArgs(1)),
+		RunE: withApp(func(cmd *cobra.Command, args []string, a *app.App) error {
+			if format != "text" && format != "json" {
+				return invalidFormat(format, "text", "json")
+			}
+			ctx := cmd.Context()
+			t, err := a.ResolveInput(ctx, args[0], forceISIN)
 			if err != nil {
 				return err
 			}
-			defer app.Close()
-
-			ctx := cmd.Context()
-			arg := strings.TrimSpace(args[0])
-
-			ticker, err := app.ResolveInput(ctx, arg, isISIN)
+			q, err := a.Quotes.Get(ctx, t, false)
 			if err != nil {
-				return exitError(err)
+				return fmt.Errorf("%s: %w", t, err)
 			}
-
-			if !app.HasFinnhubKey() {
-				return exitError(fmt.Errorf("%w: set it via `fin-cli config set finnhub.api_key <KEY>` or FIN_CLI_FINNHUB_KEY", domain.ErrNoAPIKey))
-			}
-
-			q, err := app.Quotes.Get(ctx, ticker, false)
-			if err != nil {
-				return exitError(err)
-			}
-
-			candles, herr := app.Quotes.History(ctx, ticker, domain.DefaultRange)
-			if herr != nil {
-				// History is best-effort; log and continue without candles.
-				app.Logger.Debug("history failed", "err", herr)
-				candles = nil
-			}
-
-			switch format {
-			case "", "text":
-				RenderQuote(os.Stdout, q, candles, app.RenderOptions())
-			case "json":
-				if err := encodeJSON(os.Stdout, q, candles); err != nil {
-					return exitError(err)
+			var candles []domain.Candle
+			if !noChart {
+				// The chart is best effort: a quote without history is still useful.
+				if candles, err = a.Quotes.History(ctx, t, domain.HistorySessions, false); err != nil {
+					a.Logger.Debug("history unavailable", "ticker", t, "err", err)
 				}
-			default:
-				return exitError(fmt.Errorf("%w: unknown format %q", domain.ErrInvalidInput, format))
 			}
+			out := cmd.OutOrStdout()
+			if format == "json" {
+				return writeJSON(out, struct {
+					Quote   domain.Quote    `json:"quote"`
+					Candles []domain.Candle `json:"candles"`
+				}{q, candles})
+			}
+			RenderQuote(out, q, candles, RenderOptions{Printer: a.Printer, Width: termWidth(out)})
 			return nil
-		},
+		}),
 	}
-	cmd.Flags().BoolVar(&isISIN, "isin", false, "treat argument as an ISIN (auto-detected when it matches the ISIN format)")
-	cmd.Flags().StringVar(&format, "format", "text", "output format: text|json")
+	cmd.Flags().BoolVar(&forceISIN, "isin", false, "treat the argument as an ISIN even if it does not look like one")
+	cmd.Flags().StringVarP(&format, "format", "f", "text", "output format: text|json")
+	cmd.Flags().BoolVar(&noChart, "no-chart", false, "skip the price history (one request less)")
 	return cmd
 }
 
-// exitError bridges a domain-classified error to Cobra: it sets the exit code
-// via os.Exit after printing to stderr, because Cobra itself only uses 0/1.
-func exitError(err error) error {
-	if err == nil {
-		return nil
-	}
-	fmt.Fprintln(os.Stderr, "error: "+err.Error())
-	code := ExitCodeFor(err)
-	if code == ExitOK {
-		return nil
-	}
-	os.Exit(code)
-	return err // unreachable
-}
-
-func encodeJSON(w *os.File, q domain.Quote, candles []domain.Candle) error {
-	type out struct {
-		Quote   domain.Quote    `json:"quote"`
-		Candles []domain.Candle `json:"candles,omitempty"`
-	}
+func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(out{Quote: q, Candles: candles})
+	return enc.Encode(v)
 }

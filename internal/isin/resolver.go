@@ -1,4 +1,5 @@
-// Package isin resolves ISIN codes to tickers via OpenFIGI, with a 30-day disk cache.
+// Package isin resolves ISIN codes to tickers through a domain.ISINResolver
+// with a 30-day disk cache (mappings practically never change).
 package isin
 
 import (
@@ -7,47 +8,37 @@ import (
 	"strings"
 	"time"
 
-	"fin-cli/internal/cache"
-	"fin-cli/internal/domain"
+	"github.com/msalexms/fin-cli/internal/cache"
+	"github.com/msalexms/fin-cli/internal/domain"
 )
 
-// DefaultTTL is the default freshness window for ISIN→ticker mappings.
-// Mappings change extremely rarely, so 30 days is conservative.
-const DefaultTTL = 30 * 24 * time.Hour
+const ttl = 30 * 24 * time.Hour
 
-// Service caches resolutions from a domain.IsinResolver.
+// Service caches resolutions.
 type Service struct {
-	Inner domain.IsinResolver
-	Cache *cache.Store
-	TTL   time.Duration
+	inner domain.ISINResolver
+	cache *cache.Store
 }
 
 // New builds a Service.
-func New(inner domain.IsinResolver, c *cache.Store, ttl time.Duration) *Service {
-	if ttl == 0 {
-		ttl = DefaultTTL
-	}
-	return &Service{Inner: inner, Cache: c, TTL: ttl}
+func New(inner domain.ISINResolver, c *cache.Store) *Service {
+	return &Service{inner: inner, cache: c}
 }
 
 // Resolve returns the ticker for isin, using the cache when fresh.
 func (s *Service) Resolve(ctx context.Context, isin domain.ISIN) (domain.Ticker, error) {
-	norm := domain.ISIN(strings.ToUpper(strings.TrimSpace(string(isin))))
-	if !domain.IsISIN(string(norm)) {
+	norm := strings.ToUpper(strings.TrimSpace(string(isin)))
+	if !domain.IsISIN(norm) {
 		return "", fmt.Errorf("%w: %q is not a valid ISIN", domain.ErrInvalidInput, isin)
 	}
-	key := "ISIN_" + string(norm)
-
-	if e, err := cache.Get[string](s.Cache, key); err == nil {
-		if time.Since(e.FetchedAt) <= s.TTL && e.Value != "" {
-			return domain.Ticker(e.Value), nil
-		}
+	key := "ISIN_" + norm
+	if e, err := cache.Get[string](s.cache, key); err == nil && time.Since(e.FetchedAt) <= ttl && e.Value != "" {
+		return domain.Ticker(e.Value), nil
 	}
-
-	t, err := s.Inner.Resolve(ctx, norm)
+	t, err := s.inner.Resolve(ctx, domain.ISIN(norm))
 	if err != nil {
 		return "", err
 	}
-	_ = cache.Set(s.Cache, key, string(t))
+	_ = cache.Set(s.cache, key, string(t))
 	return t, nil
 }
